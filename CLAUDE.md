@@ -1,0 +1,36 @@
+# CLAUDE.md
+
+Development guidelines for zylos-wecom.
+
+## Project Conventions
+
+- **ESM only** -- Use `import`/`export`, never `require()`. All files use ES Modules (`"type": "module"` in package.json)
+- **Node.js 20+** -- Minimum runtime version
+- **Conventional commits** -- `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`
+- **No `files` in package.json** -- Rely on `.gitignore` to exclude unnecessary files
+- **Secrets in `.env` only** -- Never commit secrets. Use `~/zylos/.env` for credentials, `config.json` for non-sensitive runtime config
+- **English for code** -- Comments, commit messages, PR descriptions, and documentation in English
+
+## Architecture
+
+This is a **communication component** for the Zylos agent ecosystem (WeCom/企业微信).
+
+- `src/index.js` -- Main entry point (Express webhook server)
+- `src/admin.js` -- Admin CLI (config, groups, whitelist management)
+- `src/lib/config.js` -- Config loader with hot-reload
+- `src/lib/client.js` -- WeCom API client (token management, HTTP helpers)
+- `src/lib/crypto.js` -- WeCom message encryption/decryption (AES-256-CBC + SHA1 signature)
+- `src/lib/message.js` -- Message send/receive, media upload/download
+- `src/lib/contact.js` -- User info lookup
+- `scripts/send.js` -- C4 outbound message interface
+- `hooks/` -- Lifecycle hooks (post-install, pre-upgrade, post-upgrade)
+- `ecosystem.config.cjs` -- PM2 service config (CommonJS required by PM2)
+
+See [DESIGN.md](./DESIGN.md) for full architecture documentation.
+
+## WeCom API
+
+- No SDK used; direct HTTP calls via axios
+- Auth: corp_id + corp_secret -> access_token (7200s expiry)
+- Webhook: XML-encoded events, AES-256-CBC encryption
+- Send: JSON POST to qyapi.weixin.qq.com endpoints

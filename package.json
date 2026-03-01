@@ -1,0 +1,36 @@
+{
+  "name": "zylos-wecom",
+  "version": "0.1.0",
+  "description": "WeCom (企业微信) communication channel for Zylos agents",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "homepage": "https://github.com/zylos-ai/zylos-wecom#readme",
+  "bugs": {
+    "url": "https://github.com/zylos-ai/zylos-wecom/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zylos-ai/zylos-wecom.git"
+  },
+  "keywords": [
+    "zylos",
+    "wecom",
+    "wechat-work",
+    "agent"
+  ],
+  "author": "Zylos AI",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "form-data": "^4.0.0"
+  }
+}
