@@ -43,6 +43,8 @@ const TOKEN_FILE = path.join(DATA_DIR, '.internal-token');
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(TOKEN_FILE, INTERNAL_SECRET, { mode: 0o600 });
+  // Enforce restrictive perms even if token file already existed.
+  fs.chmodSync(TOKEN_FILE, 0o600);
 } catch (err) {
   console.error(`[wecom] Failed to write internal token file: ${err.message}`);
 }
@@ -303,8 +305,9 @@ function checkGroupPermission(chatId, userId, isMentioned) {
     case 'allowlist': {
       const groupConfig = config.groups?.[chatId];
       if (!groupConfig) return false;
-      // Check mode: "mention" requires @bot mention, "smart" receives all
-      const mode = groupConfig.mode || 'mention';
+      // Check mode: "mention" requires @bot mention, "smart" receives all.
+      // Legacy configs may only have requireMention without mode.
+      const mode = groupConfig.mode || (groupConfig.requireMention === false ? 'smart' : 'mention');
       if (mode === 'mention' && !isMentioned) return false;
       // Check allowFrom sender restriction
       if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
@@ -406,7 +409,7 @@ function wsSend(data, reqId) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingSends.delete(reqId);
-      resolve({ ok: true, timeout: true }); // Assume success on timeout (most succeed)
+      resolve({ ok: false, error: 'Send acknowledgement timeout', timeout: true });
     }, SEND_TIMEOUT);
 
     pendingSends.set(reqId, { resolve, timer });
@@ -785,13 +788,20 @@ function startInternalServer() {
 
     let body = '';
     req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const data = JSON.parse(body);
-        handleInternalRequest(req.url, data, res);
+        await handleInternalRequest(req.url, data, res);
       } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        if (!res.headersSent) {
+          const status = err instanceof SyntaxError ? 400 : 500;
+          const error = err instanceof SyntaxError ? 'Invalid JSON' : 'Internal server error';
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error }));
+        }
+        if (!(err instanceof SyntaxError)) {
+          console.error(`[wecom] Internal request handling failed: ${err.message}`);
+        }
       }
     });
   });

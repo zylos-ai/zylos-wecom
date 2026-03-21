@@ -92,7 +92,7 @@ pm2 logs zylos-wecom
   "dmAllowFrom": [],
   "groupPolicy": "allowlist",
   "groups": {},
-  "message": { "context_messages": 10, "useMarkdown": false },
+  "message": { "context_messages": 10, "welcome_text": "" },
   "ws": {
     "url": "wss://openws.work.weixin.qq.com",
     "heartbeat_interval": 30000,
@@ -112,7 +112,6 @@ $ADM show-owner              # 显示主人信息
 $ADM set-dm-policy owner     # 设置私聊策略
 $ADM list-dm-allow           # 查看私聊白名单
 $ADM add-dm-allow <user_id>  # 添加用户到白名单
-$ADM set-markdown on         # 启用 Markdown 消息
 $ADM help                    # 显示所有命令
 ```
 

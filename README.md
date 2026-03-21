@@ -92,7 +92,7 @@ Send a message to your WeCom bot. The first private message sender becomes the o
   "dmAllowFrom": [],
   "groupPolicy": "allowlist",
   "groups": {},
-  "message": { "context_messages": 10, "useMarkdown": false },
+  "message": { "context_messages": 10, "welcome_text": "" },
   "ws": {
     "url": "wss://openws.work.weixin.qq.com",
     "heartbeat_interval": 30000,
@@ -112,7 +112,6 @@ $ADM show-owner              # Show owner info
 $ADM set-dm-policy owner     # Set DM policy
 $ADM list-dm-allow           # List DM allowlist
 $ADM add-dm-allow <user_id>  # Add user to allowlist
-$ADM set-markdown on         # Enable markdown messages
 $ADM help                    # Show all commands
 ```
 

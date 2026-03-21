@@ -89,9 +89,6 @@ $ADM list-groups                              # List all configured groups
 $ADM add-group <chat_id> <name> [mode]        # Add group (mode: mention|smart)
 $ADM remove-group <chat_id>                   # Remove a group
 $ADM set-group-policy <disabled|allowlist|open>  # Set group policy
-
-# Message Settings
-$ADM set-markdown <on|off>                    # Toggle markdown message rendering
 ```
 
 After changes, restart: `pm2 restart zylos-wecom`

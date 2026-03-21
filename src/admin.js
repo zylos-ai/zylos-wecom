@@ -199,21 +199,6 @@ const commands = {
     }
   },
 
-  'set-markdown': (value) => {
-    value = String(value || '').trim().toLowerCase();
-    if (!['on', 'off', 'true', 'false'].includes(value)) {
-      console.error('Usage: admin.js set-markdown <on|off>');
-      process.exit(1);
-    }
-    const enabled = value === 'on' || value === 'true';
-    const config = loadConfig();
-    if (!config.message) config.message = {};
-    config.message.useMarkdown = enabled;
-    saveConfigOrExit(config);
-    console.log(`Markdown messages: ${enabled ? 'ON' : 'OFF'}`);
-    console.log('Config hot-reloads, no restart needed.');
-  },
-
   'help': () => {
     console.log(`
 zylos-wecom admin CLI (WebSocket Bot mode)
@@ -235,9 +220,6 @@ Commands:
   remove-dm-allow <user_id>           Remove user from dmAllowFrom
 
   show-owner                          Show current owner
-
-  Message Settings:
-  set-markdown <on|off>               Toggle markdown message rendering
 
 Permission flow:
   Private DM:  dmPolicy (open|allowlist|owner) + dmAllowFrom

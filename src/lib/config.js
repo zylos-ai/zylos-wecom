@@ -29,13 +29,14 @@ export const DEFAULT_CONFIG = {
   // Group policy: 'open' (all groups), 'allowlist' (only configured groups), 'disabled' (no groups)
   groupPolicy: 'allowlist',
   // Per-group configuration map
-  // Format: { "chatId": { name, mode, requireMention, allowFrom } }
+  // Format: { "chatId": { name, mode, allowFrom } }
   // mode: "mention" (respond to @mentions) or "smart" (receive all messages)
+  // Legacy config field "requireMention" is still supported for backward compatibility.
   groups: {},
   // Message settings
   message: {
     context_messages: 10,
-    welcome_text: ''  // empty = forward enter_chat to C4; non-empty = auto-reply
+    welcome_text: ''  // empty = no auto-reply; non-empty = auto-reply
   },
   // WebSocket settings
   ws: {

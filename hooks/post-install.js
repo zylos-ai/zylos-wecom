@@ -34,7 +34,7 @@ const INITIAL_CONFIG = {
   groups: {},
   message: {
     context_messages: 10,
-    useMarkdown: false
+    welcome_text: ''
   },
   ws: {
     url: 'wss://openws.work.weixin.qq.com',

@@ -103,22 +103,30 @@ if (fs.existsSync(configPath)) {
     }
 
     // Migration 11: Ensure message settings
-    if (!config.message) {
-      config.message = { context_messages: 10, useMarkdown: false };
+    if (!config.message || typeof config.message !== 'object') {
+      config.message = { context_messages: 10, welcome_text: '' };
       migrated = true;
       migrations.push('Added message settings');
     } else {
-      // Migrate useMarkdownCard -> useMarkdown
+      if (config.message.context_messages === undefined) {
+        config.message.context_messages = 10;
+        migrated = true;
+        migrations.push('Added message.context_messages');
+      }
+      if (config.message.welcome_text === undefined) {
+        config.message.welcome_text = '';
+        migrated = true;
+        migrations.push('Added message.welcome_text');
+      }
       if (config.message.useMarkdownCard !== undefined) {
-        config.message.useMarkdown = config.message.useMarkdownCard;
         delete config.message.useMarkdownCard;
         migrated = true;
-        migrations.push('Renamed useMarkdownCard -> useMarkdown');
+        migrations.push('Removed deprecated message.useMarkdownCard');
       }
-      if (config.message.useMarkdown === undefined) {
-        config.message.useMarkdown = false;
+      if (config.message.useMarkdown !== undefined) {
+        delete config.message.useMarkdown;
         migrated = true;
-        migrations.push('Added message.useMarkdown');
+        migrations.push('Removed deprecated message.useMarkdown');
       }
     }
 
