@@ -367,24 +367,18 @@ function wsSend(data) {
 
 /**
  * Send a reply to a message callback (using original reqId).
+ * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_respond_msg.
  */
 function sendReply(reqId, text) {
-  const useMarkdown = config.message?.useMarkdown;
-  if (useMarkdown) {
-    return wsSend(buildRespondMsg(reqId, 'markdown', { markdown: { content: text } }));
-  }
-  return wsSend(buildRespondMsg(reqId, 'text', { text: { content: text } }));
+  return wsSend(buildRespondMsg(reqId, 'markdown', { markdown: { content: text } }));
 }
 
 /**
  * Send a proactive message to a chat.
+ * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_send_msg.
  */
 function sendProactive(chatId, text) {
-  const useMarkdown = config.message?.useMarkdown;
-  if (useMarkdown) {
-    return wsSend(buildSendMsg(chatId, 'markdown', { markdown: { content: text } }));
-  }
-  return wsSend(buildSendMsg(chatId, 'text', { text: { content: text } }));
+  return wsSend(buildSendMsg(chatId, 'markdown', { markdown: { content: text } }));
 }
 
 /**
@@ -610,15 +604,24 @@ function connect() {
       const cmd = frame.cmd;
 
       // Handle authentication response
-      if (cmd === 'aibot_subscribe') {
-        if (frame.body?.code === 0 || frame.body?.status === 'ok') {
+      // WeCom returns: {"headers":{"req_id":"..."},"errcode":0,"errmsg":"ok"} (no cmd field)
+      if (cmd === 'aibot_subscribe' || (!cmd && frame.errcode !== undefined && !authenticated)) {
+        if (frame.errcode === 0 || frame.body?.code === 0) {
           authenticated = true;
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
           console.log('[wecom] Authenticated successfully');
           startHeartbeat();
         } else {
-          console.error(`[wecom] Authentication failed: ${JSON.stringify(frame.body)}`);
+          console.error(`[wecom] Authentication failed: ${JSON.stringify(frame)}`);
           ws.close();
+        }
+        return;
+      }
+
+      // Handle generic error responses (no cmd field, already authenticated)
+      if (!cmd && frame.errcode !== undefined && authenticated) {
+        if (frame.errcode !== 0) {
+          console.error(`[wecom] Send error: ${JSON.stringify(frame)}`);
         }
         return;
       }
@@ -644,8 +647,8 @@ function connect() {
         return;
       }
 
-      // Log unknown frames
-      console.log(`[wecom] Unknown frame: ${cmd}`);
+      // Log unknown frames with full content for debugging
+      console.log(`[wecom] Unknown frame: ${JSON.stringify(frame).substring(0, 500)}`);
     } catch (err) {
       console.error(`[wecom] Failed to parse message: ${err.message}`);
     }
