@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - 2026-03-21
+## [0.1.1] - 2026-03-21
 
 ### Changed
 - **Breaking**: Switched from HTTP webhook callback to WebSocket long connection mode (智能机器人长连接)
