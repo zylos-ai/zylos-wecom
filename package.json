@@ -1,7 +1,7 @@
 {
   "name": "zylos-wecom",
-  "version": "0.1.0",
-  "description": "WeCom (企业微信) communication channel for Zylos agents",
+  "version": "0.1.1",
+  "description": "WeCom (企业微信) communication channel for Zylos agents - WebSocket bot mode",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
@@ -20,7 +20,8 @@
     "zylos",
     "wecom",
     "wechat-work",
-    "agent"
+    "agent",
+    "websocket"
   ],
   "author": "Zylos AI",
   "license": "MIT",
@@ -28,9 +29,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "axios": "^1.6.0",
     "dotenv": "^16.4.5",
-    "express": "^4.18.2",
-    "form-data": "^4.0.0"
+    "ws": "^8.18.0"
   }
 }

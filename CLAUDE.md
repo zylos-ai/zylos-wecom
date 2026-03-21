@@ -27,23 +27,22 @@ After merge, create a GitHub Release with tag `vX.Y.Z` from the merge commit.
 ## Architecture
 
 This is a **communication component** for the Zylos agent ecosystem (WeCom/企业微信).
+Uses **WebSocket long connection** mode (智能机器人长连接) — no public IP, SSL, or callback URL needed.
 
-- `src/index.js` -- Main entry point (Express webhook server)
+- `src/index.js` -- Main entry point (WebSocket client + internal HTTP API)
 - `src/admin.js` -- Admin CLI (config, groups, whitelist management)
 - `src/lib/config.js` -- Config loader with hot-reload
-- `src/lib/client.js` -- WeCom API client (token management, HTTP helpers)
-- `src/lib/crypto.js` -- WeCom message encryption/decryption (AES-256-CBC + SHA1 signature)
-- `src/lib/message.js` -- Message send/receive, media upload/download
-- `src/lib/contact.js` -- User info lookup
-- `scripts/send.js` -- C4 outbound message interface
+- `scripts/send.js` -- C4 outbound message interface (via internal HTTP API)
 - `hooks/` -- Lifecycle hooks (post-install, pre-upgrade, post-upgrade)
 - `ecosystem.config.cjs` -- PM2 service config (CommonJS required by PM2)
 
 See [DESIGN.md](./DESIGN.md) for full architecture documentation.
 
-## WeCom API
+## WeCom WebSocket Protocol
 
-- No SDK used; direct HTTP calls via axios
-- Auth: corp_id + corp_secret -> access_token (7200s expiry)
-- Webhook: XML-encoded events, AES-256-CBC encryption
-- Send: JSON POST to qyapi.weixin.qq.com endpoints
+- Connection: `wss://openws.work.weixin.qq.com`
+- Auth: botId + secret via `aibot_subscribe` frame
+- Heartbeat: `ping` every 30 seconds
+- Receive: `aibot_msg_callback` / `aibot_event_callback` JSON frames
+- Send: `aibot_respond_msg` (reply) / `aibot_send_msg` (proactive) JSON frames
+- Only dependency: `ws` (WebSocket client library)

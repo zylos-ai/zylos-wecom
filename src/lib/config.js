@@ -2,7 +2,7 @@
  * Configuration loader for zylos-wecom
  *
  * Loads config from ~/zylos/components/wecom/config.json
- * Secrets from ~/zylos/.env (WECOM_CORP_ID, WECOM_CORP_SECRET, etc.)
+ * Secrets from ~/zylos/.env (WECOM_BOT_ID, WECOM_BOT_SECRET)
  */
 
 import fs from 'fs';
@@ -15,11 +15,7 @@ export const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 // Default configuration
 export const DEFAULT_CONFIG = {
   enabled: true,
-  webhook_port: 3459,
-  // Bot settings
-  bot: {
-    agent_id: 0
-  },
+  internal_port: 4459,
   // Owner (primary partner) - auto-bound on first private message
   owner: {
     bound: false,
@@ -33,19 +29,21 @@ export const DEFAULT_CONFIG = {
   // Group policy: 'open' (all groups), 'allowlist' (only configured groups), 'disabled' (no groups)
   groupPolicy: 'allowlist',
   // Per-group configuration map
-  // Format: { "chatId": { name, mode, requireMention, allowFrom } }
+  // Format: { "chatId": { name, mode, allowFrom } }
   // mode: "mention" (respond to @mentions) or "smart" (receive all messages)
+  // Legacy config field "requireMention" is still supported for backward compatibility.
   groups: {},
-  // Proxy settings (optional)
-  proxy: {
-    enabled: false,
-    host: '',
-    port: 0
-  },
   // Message settings
   message: {
     context_messages: 10,
-    useMarkdownCard: false
+    welcome_text: ''  // empty = no auto-reply; non-empty = auto-reply
+  },
+  // WebSocket settings
+  ws: {
+    url: 'wss://openws.work.weixin.qq.com',
+    heartbeat_interval: 30000,
+    reconnect_initial_delay: 1000,
+    reconnect_max_delay: 30000
   }
 };
 
@@ -63,10 +61,9 @@ export function loadConfig() {
       const parsed = JSON.parse(content);
       config = { ...DEFAULT_CONFIG, ...parsed };
       // Ensure nested objects are merged
-      config.bot = { ...DEFAULT_CONFIG.bot, ...parsed.bot };
       config.owner = { ...DEFAULT_CONFIG.owner, ...parsed.owner };
-      config.proxy = { ...DEFAULT_CONFIG.proxy, ...parsed.proxy };
       config.message = { ...DEFAULT_CONFIG.message, ...parsed.message };
+      config.ws = { ...DEFAULT_CONFIG.ws, ...parsed.ws };
     } else {
       console.warn(`[wecom] Config file not found: ${CONFIG_PATH}`);
       config = { ...DEFAULT_CONFIG };
@@ -177,24 +174,7 @@ export function stopWatching() {
  */
 export function getCredentials() {
   return {
-    corp_id: process.env.WECOM_CORP_ID || '',
-    corp_secret: process.env.WECOM_CORP_SECRET || '',
-    agent_id: parseInt(process.env.WECOM_AGENT_ID || '0', 10),
-    token: process.env.WECOM_TOKEN || '',
-    encoding_aes_key: process.env.WECOM_ENCODING_AES_KEY || ''
+    bot_id: process.env.WECOM_BOT_ID || '',
+    secret: process.env.WECOM_BOT_SECRET || ''
   };
-}
-
-/**
- * Get proxy config for axios
- */
-export function getProxyConfig() {
-  const cfg = getConfig();
-  if (cfg.proxy?.enabled && cfg.proxy?.host && cfg.proxy?.port) {
-    return {
-      host: cfg.proxy.host,
-      port: cfg.proxy.port
-    };
-  }
-  return false;
 }

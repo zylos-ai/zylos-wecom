@@ -16,24 +16,23 @@
 
 ## 功能特性
 
-- **Webhook 集成** -- 通过加密 webhook 回调接收企业微信消息
-- **企业微信加密** -- 完整的 AES-256-CBC 加解密实现
-- **消息类型** -- 支持文本、Markdown、图片、文件的收发
-- **媒体处理** -- 通过企业微信临时素材 API 上传和下载媒体文件
+- **WebSocket 长连接** -- 通过企业微信智能机器人 WebSocket 协议连接
+- **无需公网 IP** -- 出站 WebSocket 连接，无需回调 URL 或 SSL
+- **简单凭证** -- 仅需 Bot ID + Secret（2 个值，无需 corpSecret/token/AES key）
+- **消息类型** -- 支持文本、Markdown 发送；文本、图片、语音、视频、文件接收
 - **访问控制** -- 私聊策略(开放/白名单/仅主人)和群聊策略(按群配置)
 - **主人自动绑定** -- 第一个发送私聊消息的用户自动成为主人
 - **上下文追踪** -- 内存中的聊天记录用于上下文对话
+- **自动重连** -- 断线后指数退避 + 随机抖动重连
 - **C4 桥接** -- 标准 Zylos 通讯桥接集成
 - **管理 CLI** -- 无需手动编辑 JSON 的配置管理
 - **热重载** -- 配置更改无需重启即可生效(大部分设置)
-- **优雅关闭** -- SIGINT/SIGTERM 信号下的资源清理
 
 ## 环境要求
 
 - Node.js >= 20.0.0
 - 企业微信企业账号
-- 已创建自建应用并开启消息接收
-- 用于 webhook 回调的公网 HTTPS 地址
+- 管理员权限（用于创建智能机器人）
 
 ## 快速开始
 
@@ -50,26 +49,22 @@ npm install
 node hooks/post-install.js
 ```
 
-### 2. 配置凭证
+### 2. 创建智能机器人
+
+1. 打开企业微信客户端 > 工作台 > 智能机器人 > 创建机器人
+2. 选择 **API模式创建**（需要管理员权限）
+3. 选择 **使用长连接**
+4. 复制 **Bot ID**（格式：`aibXXX`）和 **Secret**
+5. Secret 只显示一次 -- 立即保存
+
+### 3. 配置凭证
 
 添加到 `~/zylos/.env`:
 
 ```bash
-WECOM_CORP_ID=ww...
-WECOM_CORP_SECRET=应用Secret
-WECOM_AGENT_ID=1000002
-WECOM_TOKEN=回调Token
-WECOM_ENCODING_AES_KEY=回调EncodingAESKey_43位
+WECOM_BOT_ID=aibxxxxxxxxxxxxxxxx
+WECOM_BOT_SECRET=你的bot_secret
 ```
-
-### 3. 企业微信后台配置
-
-1. 登录[企业微信管理后台](https://work.weixin.qq.com)
-2. 创建自建应用
-3. 在应用设置中开启"接收消息":
-   - 设置回调 URL: `https://your-domain.com/wecom/webhook`
-   - 设置 Token 和 EncodingAESKey(与 .env 中相同)
-4. 记下 AgentId 和 Secret
 
 ### 4. 启动服务
 
@@ -91,15 +86,19 @@ pm2 logs zylos-wecom
 ```json
 {
   "enabled": true,
-  "webhook_port": 3459,
-  "bot": { "agent_id": 0 },
+  "internal_port": 4459,
   "owner": { "bound": false, "user_id": "", "name": "" },
   "dmPolicy": "owner",
   "dmAllowFrom": [],
   "groupPolicy": "allowlist",
   "groups": {},
-  "proxy": { "enabled": false, "host": "", "port": 0 },
-  "message": { "context_messages": 10, "useMarkdownCard": false }
+  "message": { "context_messages": 10, "welcome_text": "" },
+  "ws": {
+    "url": "wss://openws.work.weixin.qq.com",
+    "heartbeat_interval": 30000,
+    "reconnect_initial_delay": 1000,
+    "reconnect_max_delay": 30000
+  }
 }
 ```
 
@@ -113,7 +112,6 @@ $ADM show-owner              # 显示主人信息
 $ADM set-dm-policy owner     # 设置私聊策略
 $ADM list-dm-allow           # 查看私聊白名单
 $ADM add-dm-allow <user_id>  # 添加用户到白名单
-$ADM set-markdown on         # 启用 Markdown 消息
 $ADM help                    # 显示所有命令
 ```
 

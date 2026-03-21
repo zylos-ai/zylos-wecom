@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.1] - 2026-03-21
+
+### Changed
+- **Breaking**: Switched from HTTP webhook callback to WebSocket long connection mode (智能机器人长连接)
+- Only 2 credentials needed: `WECOM_BOT_ID` + `WECOM_BOT_SECRET` (previously 5)
+- No public IP, SSL, or callback URL required
+- Replaced Express webhook server with WebSocket client (`ws` library)
+- Messages sent via WebSocket frames instead of REST API
+- send.js now communicates with main process via internal HTTP API
+
+### Removed
+- Express HTTP webhook server
+- AES-256-CBC encryption/decryption (not needed for WebSocket mode)
+- Access token management (bot mode doesn't use corp API)
+- User info lookup via corp API (names now from message callbacks)
+- Media upload/download via REST API
+- Dependencies: `express`, `axios`, `form-data`
+
+### Added
+- WebSocket connection with automatic reconnection (exponential backoff + jitter)
+- Heartbeat (30-second ping interval)
+- Reply mode: uses original request ID for responses within 5-minute window
+- Proactive send fallback when reply window expires
+- `ws` dependency for WebSocket client
+
 ## [0.1.0] - 2026-02-28
 
 ### Added
