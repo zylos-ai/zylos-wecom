@@ -1,37 +1,43 @@
 #!/usr/bin/env node
 /**
- * zylos-wecom - WeCom Bot Service
+ * zylos-wecom - WeCom Bot Service (WebSocket Long Connection)
  *
- * Express webhook server that receives encrypted XML events from WeCom,
- * decrypts them, processes messages, and forwards to C4 bridge.
+ * Connects to WeCom via WebSocket using the Intelligent Robot (智能机器人)
+ * long connection protocol. No public IP or SSL required.
+ *
+ * Protocol: wss://openws.work.weixin.qq.com
+ * Auth: botId + secret via aibot_subscribe frame
+ * Heartbeat: ping every 30s
  */
 
 import dotenv from 'dotenv';
-import express from 'express';
+import http from 'http';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import WebSocket from 'ws';
 
 // Load .env from ~/zylos/.env (absolute path, not cwd-dependent)
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
-import { verifySignature, decrypt, encrypt, buildEncryptedReply } from './lib/crypto.js';
-import { sendTextMessage } from './lib/message.js';
-import { getUserInfo } from './lib/contact.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
 
-// Server instance for graceful shutdown
-let webhookServer = null;
+// State
 let isShuttingDown = false;
+let ws = null;
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let internalServer = null;
+let reconnectDelay = 1000;
+let authenticated = false;
 
 // Initialize
 let config = getConfig();
 const INTERNAL_SECRET = crypto.randomUUID();
-// Persist token to file so send.js (spawned by C4 in a separate process tree) can read it
 const TOKEN_FILE = path.join(DATA_DIR, '.internal-token');
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -39,10 +45,10 @@ try {
 } catch (err) {
   console.error(`[wecom] Failed to write internal token file: ${err.message}`);
 }
-console.log(`[wecom] Starting...`);
+console.log(`[wecom] Starting (WebSocket mode)...`);
 console.log(`[wecom] Data directory: ${DATA_DIR}`);
 
-// Ensure directories exist
+// Ensure directories
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -51,39 +57,6 @@ fs.mkdirSync(MEDIA_DIR, { recursive: true });
 // State files
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
 
-// ============================================================
-// Message deduplication
-// ============================================================
-const DEDUP_TTL = 5 * 60 * 1000; // 5 minutes
-const processedMessages = new Map();
-
-function isDuplicate(msgId) {
-  if (!msgId) return false;
-  if (processedMessages.has(msgId)) {
-    console.log(`[wecom] Duplicate MsgId ${msgId}, skipping`);
-    return true;
-  }
-  processedMessages.set(msgId, Date.now());
-  // Cleanup old entries
-  if (processedMessages.size > 200) {
-    const now = Date.now();
-    for (const [id, ts] of processedMessages) {
-      if (now - ts > DEDUP_TTL) processedMessages.delete(id);
-    }
-  }
-  return false;
-}
-
-// Periodic cleanup
-const dedupCleanupInterval = setInterval(() => {
-  const now = Date.now();
-  for (const [id, ts] of processedMessages) {
-    if (now - ts > DEDUP_TTL) processedMessages.delete(id);
-  }
-}, DEDUP_TTL);
-
-console.log(`[wecom] Config loaded, enabled: ${config.enabled}`);
-
 if (!config.enabled) {
   console.log(`[wecom] Component disabled in config, exiting.`);
   process.exit(0);
@@ -91,16 +64,9 @@ if (!config.enabled) {
 
 // Verify required credentials
 const creds = getCredentials();
-if (!creds.corp_id || !creds.corp_secret) {
-  console.error(`[wecom] ERROR: WECOM_CORP_ID and WECOM_CORP_SECRET must be set in ~/zylos/.env`);
+if (!creds.bot_id || !creds.secret) {
+  console.error(`[wecom] ERROR: WECOM_BOT_ID and WECOM_BOT_SECRET must be set in ~/zylos/.env`);
   process.exit(1);
-}
-if (!creds.token || !creds.encoding_aes_key) {
-  console.error(`[wecom] ERROR: WECOM_TOKEN and WECOM_ENCODING_AES_KEY must be set in ~/zylos/.env`);
-  process.exit(1);
-}
-if (!creds.agent_id) {
-  console.warn(`[wecom] WARNING: WECOM_AGENT_ID not set, some features may not work.`);
 }
 
 // Watch for config changes
@@ -114,9 +80,68 @@ watchConfig((newConfig) => {
 });
 
 // ============================================================
+// Message deduplication
+// ============================================================
+const DEDUP_TTL = 10 * 60 * 1000; // 10 minutes
+const processedMessages = new Map();
+
+function isDuplicate(msgId) {
+  if (!msgId) return false;
+  if (processedMessages.has(msgId)) {
+    console.log(`[wecom] Duplicate MsgId ${msgId}, skipping`);
+    return true;
+  }
+  processedMessages.set(msgId, Date.now());
+  if (processedMessages.size > 500) {
+    const now = Date.now();
+    for (const [id, ts] of processedMessages) {
+      if (now - ts > DEDUP_TTL) processedMessages.delete(id);
+    }
+  }
+  return false;
+}
+
+const dedupCleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [id, ts] of processedMessages) {
+    if (now - ts > DEDUP_TTL) processedMessages.delete(id);
+  }
+}, DEDUP_TTL);
+
+// ============================================================
+// Request ID tracking (for reply vs proactive send)
+// ============================================================
+const REQ_ID_TTL = 5 * 60 * 1000; // 5 minutes (WeCom stream timeout is 6 min)
+const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt }
+
+function trackRequest(msgId, reqId, chatId, userId, chatType) {
+  pendingRequests.set(String(msgId), { reqId, chatId, userId, chatType, receivedAt: Date.now() });
+}
+
+function getRequest(msgId) {
+  const entry = pendingRequests.get(String(msgId));
+  if (!entry) return null;
+  if (Date.now() - entry.receivedAt > REQ_ID_TTL) {
+    pendingRequests.delete(String(msgId));
+    return null;
+  }
+  return entry;
+}
+
+// Also track by target for proactive sends
+const activatedTargets = new Map(); // target -> chatId (for proactive sends)
+
+const reqCleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of pendingRequests) {
+    if (now - entry.receivedAt > REQ_ID_TTL) pendingRequests.delete(id);
+  }
+}, 60 * 1000);
+
+// ============================================================
 // User name cache with TTL
 // ============================================================
-const SENDER_NAME_TTL = 10 * 60 * 1000; // 10 minutes
+const SENDER_NAME_TTL = 24 * 60 * 60 * 1000; // 24 hours (longer since we can't query API)
 const userCacheMemory = new Map();
 let _userCacheDirty = false;
 
@@ -135,6 +160,21 @@ function loadUserCacheFromFile() {
   } catch (err) {
     console.log(`[wecom] Failed to load user cache file: ${err.message}`);
   }
+}
+
+function cacheUserName(userId, name) {
+  if (!userId || !name) return;
+  userCacheMemory.set(userId, { name, expireAt: Date.now() + SENDER_NAME_TTL });
+  _userCacheDirty = true;
+}
+
+function getCachedUserName(userId) {
+  if (!userId) return userId || 'unknown';
+  const cached = userCacheMemory.get(userId);
+  if (cached && Date.now() < cached.expireAt) {
+    return cached.name;
+  }
+  return userId; // Fallback to userId
 }
 
 function persistUserCache() {
@@ -169,7 +209,6 @@ function recordHistoryEntry(chatId, entry) {
     chatHistories.set(chatId, []);
   }
   const history = chatHistories.get(chatId);
-  // Deduplicate
   if (entry.msgId && history.some(m => m.msgId === entry.msgId)) {
     return;
   }
@@ -187,64 +226,6 @@ function getContextMessages(chatId, currentMsgId) {
   const filtered = history.filter(m => m.msgId !== currentMsgId);
   const count = Math.min(limit, filtered.length);
   return filtered.slice(-count);
-}
-
-// ============================================================
-// Helper: resolve user name
-// ============================================================
-async function resolveUserName(userId) {
-  if (!userId) return 'unknown';
-
-  const now = Date.now();
-  const cached = userCacheMemory.get(userId);
-  if (cached && now < cached.expireAt) {
-    return cached.name;
-  }
-
-  try {
-    const result = await getUserInfo(userId);
-    if (result.success && result.user?.name) {
-      userCacheMemory.set(userId, { name: result.user.name, expireAt: now + SENDER_NAME_TTL });
-      _userCacheDirty = true;
-      return result.user.name;
-    }
-  } catch (err) {
-    console.log(`[wecom] Failed to resolve user name for ${userId}: ${err.message}`);
-  }
-
-  // Fallback: use userId as name
-  userCacheMemory.set(userId, { name: userId, expireAt: now + SENDER_NAME_TTL });
-  return userId;
-}
-
-// ============================================================
-// Helper: escape XML special characters
-// ============================================================
-function escapeXml(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
-// ============================================================
-// Helper: parse XML (simple regex-based, no heavy dependency)
-// ============================================================
-function parseXmlValue(xml, tag) {
-  // Try CDATA first
-  const cdataRegex = new RegExp(`<${tag}><!\\[CDATA\\[([\\s\\S]*?)\\]\\]></${tag}>`);
-  const cdataMatch = xml.match(cdataRegex);
-  if (cdataMatch) return cdataMatch[1];
-
-  // Try plain value
-  const plainRegex = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
-  const plainMatch = xml.match(plainRegex);
-  if (plainMatch) return plainMatch[1].trim();
-
-  return '';
 }
 
 // ============================================================
@@ -281,46 +262,33 @@ function isOwner(userId) {
 }
 
 function checkDmPermission(userId) {
-  // Owner always passes
   if (isOwner(userId)) return true;
-
   const policy = config.dmPolicy || 'owner';
-
   switch (policy) {
-    case 'open':
-      return true;
-    case 'owner':
-      return false; // only owner passes (checked above)
+    case 'open': return true;
+    case 'owner': return false;
     case 'allowlist':
       return (config.dmAllowFrom || []).some(id => String(id) === String(userId));
-    default:
-      return false;
+    default: return false;
   }
 }
 
 function checkGroupPermission(chatId, userId) {
   const policy = config.groupPolicy || 'allowlist';
-
-  // Owner always bypasses
   if (isOwner(userId)) return true;
-
   switch (policy) {
-    case 'disabled':
-      return false;
-    case 'open':
-      return true;
+    case 'disabled': return false;
+    case 'open': return true;
     case 'allowlist': {
       const groupConfig = config.groups?.[chatId];
       if (!groupConfig) return false;
-      // Per-group allowFrom check
       if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
         if (groupConfig.allowFrom.includes('*')) return true;
         return groupConfig.allowFrom.some(id => String(id) === String(userId));
       }
       return true;
     }
-    default:
-      return false;
+    default: return false;
   }
 }
 
@@ -344,305 +312,456 @@ function tryBindOwner(userId, userName) {
 }
 
 // ============================================================
-// Process incoming message
+// WebSocket frame builders
 // ============================================================
-async function processMessage(msgXml) {
-  const msgType = parseXmlValue(msgXml, 'MsgType');
-  const fromUser = parseXmlValue(msgXml, 'FromUserName');
-  const toUser = parseXmlValue(msgXml, 'ToUserName');
-  const msgId = parseXmlValue(msgXml, 'MsgId');
-  const agentId = parseXmlValue(msgXml, 'AgentID');
-  const createTime = parseXmlValue(msgXml, 'CreateTime');
-
-  // Self-message loop prevention: check if sender is the bot's corp/agent
-  if (!fromUser || String(fromUser) === String(creds.corp_id)) {
-    console.log(`[wecom] Ignoring self/system message`);
-    return;
-  }
-
-  // Deduplication
-  if (isDuplicate(msgId)) return;
-
-  // Resolve sender name
-  const senderName = await resolveUserName(fromUser);
-
-  // Determine if this is a DM or group message
-  // WeCom group messages have ChatId in the XML
-  const chatId = parseXmlValue(msgXml, 'ChatId');
-  const isGroup = !!chatId;
-
-  // Permission check
-  if (isGroup) {
-    if (!checkGroupPermission(chatId, fromUser)) {
-      console.log(`[wecom] Group message from ${senderName} in ${chatId} blocked by policy`);
-      return;
+function buildSubscribe() {
+  return JSON.stringify({
+    cmd: 'aibot_subscribe',
+    headers: { req_id: crypto.randomUUID() },
+    body: {
+      bot_id: creds.bot_id,
+      secret: creds.secret
     }
-  } else {
-    // Auto-bind owner on first DM
-    if (!config.owner?.bound) {
-      tryBindOwner(fromUser, senderName);
-    }
-
-    if (!checkDmPermission(fromUser)) {
-      console.log(`[wecom] DM from ${senderName} (${fromUser}) blocked by policy`);
-      return;
-    }
-  }
-
-  // Extract message content based on type
-  let textContent = '';
-  let mediaInfo = '';
-
-  switch (msgType) {
-    case 'text': {
-      textContent = parseXmlValue(msgXml, 'Content');
-      break;
-    }
-    case 'image': {
-      const picUrl = parseXmlValue(msgXml, 'PicUrl');
-      const mediaId = parseXmlValue(msgXml, 'MediaId');
-      // Download the image
-      try {
-        const { downloadMedia } = await import('./lib/message.js');
-        const safeMsgId = String(msgId).replace(/[^a-zA-Z0-9_-]/g, '_');
-        const savePath = path.join(MEDIA_DIR, `img_${safeMsgId}.jpg`);
-        const dlResult = await downloadMedia(mediaId, savePath);
-        if (dlResult.success) {
-          mediaInfo = `[image: ${dlResult.path}]`;
-          textContent = mediaInfo;
-        } else {
-          textContent = `[image, media_id: ${mediaId}]`;
-        }
-      } catch {
-        textContent = `[image, media_id: ${parseXmlValue(msgXml, 'MediaId')}]`;
-      }
-      break;
-    }
-    case 'voice': {
-      const mediaId = parseXmlValue(msgXml, 'MediaId');
-      textContent = `[voice, media_id: ${mediaId}]`;
-      break;
-    }
-    case 'video': {
-      const mediaId = parseXmlValue(msgXml, 'MediaId');
-      textContent = `[video, media_id: ${mediaId}]`;
-      break;
-    }
-    case 'file': {
-      const mediaId = parseXmlValue(msgXml, 'MediaId');
-      const fileName = parseXmlValue(msgXml, 'FileName');
-      textContent = `[file: ${fileName || 'unknown'}, media_id: ${mediaId}]`;
-      break;
-    }
-    case 'location': {
-      const lat = parseXmlValue(msgXml, 'Location_X');
-      const lon = parseXmlValue(msgXml, 'Location_Y');
-      const label = parseXmlValue(msgXml, 'Label');
-      textContent = `[location: ${label || ''} (${lat}, ${lon})]`;
-      break;
-    }
-    case 'link': {
-      const title = parseXmlValue(msgXml, 'Title');
-      const description = parseXmlValue(msgXml, 'Description');
-      const url = parseXmlValue(msgXml, 'Url');
-      textContent = `[link: ${title || description || url}] ${url}`;
-      break;
-    }
-    case 'event': {
-      const event = parseXmlValue(msgXml, 'Event');
-      console.log(`[wecom] Event received: ${event}`);
-      // Handle subscribe event -- could auto-bind owner
-      if (event === 'subscribe' && !config.owner?.bound) {
-        tryBindOwner(fromUser, senderName);
-      }
-      return; // Don't forward events to C4
-    }
-    default: {
-      textContent = `[${msgType} message]`;
-      break;
-    }
-  }
-
-  if (!textContent) return;
-
-  // Record to history
-  recordHistoryEntry(isGroup ? chatId : fromUser, {
-    msgId,
-    userId: fromUser,
-    userName: senderName,
-    text: textContent,
-    timestamp: new Date(parseInt(createTime, 10) * 1000).toISOString()
   });
+}
 
-  // Build C4 formatted message
-  let formattedMessage;
+function buildPing() {
+  return JSON.stringify({
+    cmd: 'ping',
+    headers: { req_id: crypto.randomUUID() }
+  });
+}
 
-  if (isGroup) {
-    const groupName = config.groups?.[chatId]?.name || chatId;
-    formattedMessage = `[WeCom GROUP:${escapeXml(groupName)}] ${escapeXml(senderName)} said: ${textContent}`;
+function buildRespondMsg(reqId, msgtype, body) {
+  return JSON.stringify({
+    cmd: 'aibot_respond_msg',
+    headers: { req_id: reqId },
+    body: { msgtype, ...body }
+  });
+}
 
-    // Build context
-    const context = getContextMessages(chatId, msgId);
-    if (context.length > 0) {
-      const contextLines = context.map(m =>
-        `${escapeXml(m.userName)}: ${m.text}`
-      ).join('\n');
-      formattedMessage = `[WeCom GROUP:${escapeXml(groupName)}] ${escapeXml(senderName)} said: ${textContent}\n\n--- recent context ---\n${contextLines}`;
-    }
-
-    const endpoint = `${chatId}|type:group|msg:${msgId}`;
-    forwardToC4(formattedMessage, endpoint);
-  } else {
-    formattedMessage = `[WeCom DM] ${escapeXml(senderName)} said: ${textContent}`;
-
-    // Build context for DM
-    const context = getContextMessages(fromUser, msgId);
-    if (context.length > 0) {
-      const contextLines = context.map(m =>
-        `${escapeXml(m.userName)}: ${m.text}`
-      ).join('\n');
-      formattedMessage = `[WeCom DM] ${escapeXml(senderName)} said: ${textContent}\n\n--- recent context ---\n${contextLines}`;
-    }
-
-    const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
-    forwardToC4(formattedMessage, endpoint);
-  }
-
-  console.log(`[wecom] ${isGroup ? 'Group' : 'DM'} from ${senderName}: ${textContent.slice(0, 100)}`);
+function buildSendMsg(chatId, msgtype, body) {
+  return JSON.stringify({
+    cmd: 'aibot_send_msg',
+    headers: { req_id: crypto.randomUUID() },
+    body: { chatid: chatId, msgtype, ...body }
+  });
 }
 
 // ============================================================
-// Express webhook server
+// WebSocket message sending
 // ============================================================
-const app = express();
-
-// Raw body parser for XML
-app.use('/webhook', express.raw({ type: '*/*', limit: '5mb' }));
-
-/**
- * GET /webhook - URL Verification
- * WeCom sends: msg_signature, timestamp, nonce, echostr
- * We must decrypt echostr and return the plaintext.
- */
-app.get('/webhook', (req, res) => {
-  const { msg_signature, timestamp, nonce, echostr } = req.query;
-
-  if (!msg_signature || !timestamp || !nonce || !echostr) {
-    console.log('[wecom] Webhook verification: missing params');
-    return res.status(400).send('Missing parameters');
+function wsSend(data) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.error('[wecom] WebSocket not connected, cannot send');
+    return false;
   }
-
-  console.log(`[wecom] Webhook verification request received`);
-
   try {
-    // Verify signature
-    if (!verifySignature(msg_signature, creds.token, timestamp, nonce, echostr)) {
-      console.error('[wecom] Webhook verification: signature mismatch');
-      return res.status(403).send('Signature verification failed');
-    }
-
-    // Decrypt echostr to get the plain echostr
-    const { message: plainEchostr } = decrypt(echostr, creds.encoding_aes_key, creds.corp_id);
-
-    console.log(`[wecom] Webhook verification successful`);
-    // Return the decrypted echostr as plain text
-    res.status(200).send(plainEchostr);
+    ws.send(data);
+    return true;
   } catch (err) {
-    console.error(`[wecom] Webhook verification error: ${err.message}`);
-    res.status(500).send('Verification error');
+    console.error(`[wecom] WebSocket send error: ${err.message}`);
+    return false;
   }
-});
+}
 
 /**
- * POST /webhook - Receive Messages
- * WeCom sends encrypted XML with msg_signature, timestamp, nonce query params.
+ * Send a reply to a message callback (using original reqId).
  */
-app.post('/webhook', async (req, res) => {
-  const { msg_signature, timestamp, nonce } = req.query;
+function sendReply(reqId, text) {
+  const useMarkdown = config.message?.useMarkdown;
+  if (useMarkdown) {
+    return wsSend(buildRespondMsg(reqId, 'markdown', { markdown: { content: text } }));
+  }
+  return wsSend(buildRespondMsg(reqId, 'text', { text: { content: text } }));
+}
 
-  if (!msg_signature || !timestamp || !nonce) {
-    return res.status(400).send('Missing parameters');
+/**
+ * Send a proactive message to a chat.
+ */
+function sendProactive(chatId, text) {
+  const useMarkdown = config.message?.useMarkdown;
+  if (useMarkdown) {
+    return wsSend(buildSendMsg(chatId, 'markdown', { markdown: { content: text } }));
+  }
+  return wsSend(buildSendMsg(chatId, 'text', { text: { content: text } }));
+}
+
+/**
+ * Send a message to target, using reply mode if possible, falling back to proactive.
+ */
+function sendMessage(target, msgId, text) {
+  // Try reply mode first (using tracked reqId)
+  if (msgId) {
+    const req = getRequest(msgId);
+    if (req) {
+      console.log(`[wecom] Replying via reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+      return sendReply(req.reqId, text);
+    }
   }
 
-  // Respond immediately with success to avoid WeCom retries
-  res.status(200).send('success');
+  // Fallback: proactive send
+  // For proactive sends, we need the chatId
+  // For DMs, chatId = userId; for groups, chatId = group chatId
+  const chatId = activatedTargets.get(target) || target;
+  console.log(`[wecom] Sending proactive to chatId: ${chatId}`);
+  return sendProactive(chatId, text);
+}
 
-  try {
-    const bodyStr = req.body.toString('utf8');
+// ============================================================
+// Process incoming WebSocket message
+// ============================================================
+async function processCallback(frame) {
+  const { cmd, headers, body } = frame;
 
-    // Extract Encrypt field from the outer XML
-    const encryptedMsg = parseXmlValue(bodyStr, 'Encrypt');
-    if (!encryptedMsg) {
-      console.error('[wecom] No Encrypt field in webhook body');
+  if (cmd === 'aibot_msg_callback') {
+    const reqId = headers?.req_id;
+    const msgId = body?.msgid;
+    const aibotId = body?.aibotid;
+    const chatId = body?.chatid;
+    const chatType = body?.chattype; // 'single' or 'group'
+    const fromUser = body?.from?.userid;
+    const fromName = body?.from?.name;
+    const msgType = body?.msgtype;
+
+    if (!fromUser) {
+      console.log('[wecom] Ignoring message with no sender');
       return;
     }
 
-    // Verify signature
-    if (!verifySignature(msg_signature, creds.token, timestamp, nonce, encryptedMsg)) {
-      console.error('[wecom] Message signature verification failed');
-      return;
+    // Deduplication
+    if (isDuplicate(msgId)) return;
+
+    // Track reqId for later reply
+    trackRequest(msgId, reqId, chatId, fromUser, chatType);
+
+    // Cache user name if available
+    if (fromName) {
+      cacheUserName(fromUser, fromName);
     }
 
-    // Decrypt the message
-    const { message: decryptedXml } = decrypt(encryptedMsg, creds.encoding_aes_key, creds.corp_id);
+    const senderName = fromName || getCachedUserName(fromUser);
+    const isGroup = chatType === 'group';
 
-    // Process the decrypted XML message
-    await processMessage(decryptedXml);
-  } catch (err) {
-    console.error(`[wecom] Webhook processing error: ${err.message}`);
+    // Track activated target for proactive sends
+    if (isGroup && chatId) {
+      activatedTargets.set(chatId, chatId);
+    } else {
+      activatedTargets.set(fromUser, fromUser);
+    }
+
+    // Permission check
+    if (isGroup) {
+      if (!checkGroupPermission(chatId, fromUser)) {
+        console.log(`[wecom] Group message from ${senderName} in ${chatId} blocked by policy`);
+        return;
+      }
+    } else {
+      if (!config.owner?.bound) {
+        tryBindOwner(fromUser, senderName);
+      }
+      if (!checkDmPermission(fromUser)) {
+        console.log(`[wecom] DM from ${senderName} (${fromUser}) blocked by policy`);
+        return;
+      }
+    }
+
+    // Extract message content
+    let textContent = '';
+
+    switch (msgType) {
+      case 'text':
+        textContent = body?.text?.content || '';
+        break;
+      case 'image':
+        textContent = `[image, url: ${body?.image?.url || 'N/A'}]`;
+        break;
+      case 'voice':
+        textContent = body?.voice?.transcription || `[voice message]`;
+        break;
+      case 'video':
+        textContent = `[video message]`;
+        break;
+      case 'file':
+        textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+        break;
+      case 'mixed': {
+        // Mixed message: text + images
+        const parts = [];
+        if (body?.mixed?.items) {
+          for (const item of body.mixed.items) {
+            if (item.msgtype === 'text') {
+              parts.push(item.text?.content || '');
+            } else if (item.msgtype === 'image') {
+              parts.push('[image]');
+            }
+          }
+        }
+        textContent = parts.join(' ') || '[mixed message]';
+        break;
+      }
+      default:
+        textContent = `[${msgType} message]`;
+        break;
+    }
+
+    if (!textContent) return;
+
+    // Strip @bot mention prefix from group messages
+    if (isGroup) {
+      textContent = textContent.replace(/^@\S+\s*/, '');
+    }
+
+    // Record to history
+    recordHistoryEntry(isGroup ? chatId : fromUser, {
+      msgId,
+      userId: fromUser,
+      userName: senderName,
+      text: textContent,
+      timestamp: new Date().toISOString()
+    });
+
+    // Build C4 formatted message
+    let formattedMessage;
+
+    if (isGroup) {
+      const groupName = config.groups?.[chatId]?.name || chatId;
+      formattedMessage = `[WeCom GROUP:${groupName}] ${senderName} said: ${textContent}`;
+
+      const context = getContextMessages(chatId, msgId);
+      if (context.length > 0) {
+        const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
+        formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
+      }
+
+      const endpoint = `${chatId}|type:group|msg:${msgId}`;
+      forwardToC4(formattedMessage, endpoint);
+    } else {
+      formattedMessage = `[WeCom DM] ${senderName} said: ${textContent}`;
+
+      const context = getContextMessages(fromUser, msgId);
+      if (context.length > 0) {
+        const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
+        formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
+      }
+
+      const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
+      forwardToC4(formattedMessage, endpoint);
+    }
+
+    console.log(`[wecom] ${isGroup ? 'Group' : 'DM'} from ${senderName}: ${textContent.slice(0, 100)}`);
+
+  } else if (cmd === 'aibot_event_callback') {
+    const eventType = body?.event?.eventtype || body?.msgtype;
+    console.log(`[wecom] Event received: ${eventType}`);
+
+    // Handle enter_chat event
+    if (eventType === 'enter_chat') {
+      const reqId = headers?.req_id;
+      if (reqId) {
+        // Send welcome message if configured
+        const welcomeText = '你好！有什么可以帮你的？';
+        wsSend(JSON.stringify({
+          cmd: 'aibot_respond_welcome_msg',
+          headers: { req_id: reqId },
+          body: { msgtype: 'text', text: { content: welcomeText } }
+        }));
+      }
+    }
   }
-});
+}
 
 // ============================================================
-// Internal endpoints (bound to 127.0.0.1)
+// WebSocket connection management
 // ============================================================
-const internalApp = express();
-internalApp.use(express.json({ limit: '1mb' }));
+function startHeartbeat() {
+  stopHeartbeat();
+  const interval = config.ws?.heartbeat_interval || 30000;
+  heartbeatTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      wsSend(buildPing());
+    }
+  }, interval);
+}
 
-// Auth middleware for internal endpoints
-internalApp.use((req, res, next) => {
-  const token = req.headers['x-internal-token'];
-  if (token !== INTERNAL_SECRET) {
-    return res.status(403).json({ error: 'Invalid internal token' });
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
   }
-  next();
-});
+}
 
-/**
- * POST /internal/record-outgoing
- * Record bot's outgoing message into in-memory history.
- */
-internalApp.post('/internal/record-outgoing', (req, res) => {
-  const { chatId, text } = req.body;
-  if (!chatId || !text) {
-    return res.status(400).json({ error: 'Missing chatId or text' });
-  }
+function connect() {
+  if (isShuttingDown) return;
 
-  recordHistoryEntry(String(chatId), {
-    msgId: `out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    userId: 'bot',
-    userName: 'bot',
-    text: String(text).slice(0, 4000),
-    timestamp: new Date().toISOString()
+  const wsUrl = config.ws?.url || 'wss://openws.work.weixin.qq.com';
+  console.log(`[wecom] Connecting to ${wsUrl}...`);
+
+  ws = new WebSocket(wsUrl);
+
+  ws.on('open', () => {
+    console.log('[wecom] WebSocket connected, authenticating...');
+    ws.send(buildSubscribe());
   });
 
-  res.json({ ok: true });
-});
+  ws.on('message', (data) => {
+    try {
+      const frame = JSON.parse(data.toString());
+      const cmd = frame.cmd;
+
+      // Handle authentication response
+      if (cmd === 'aibot_subscribe') {
+        if (frame.body?.code === 0 || frame.body?.status === 'ok') {
+          authenticated = true;
+          reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
+          console.log('[wecom] Authenticated successfully');
+          startHeartbeat();
+        } else {
+          console.error(`[wecom] Authentication failed: ${JSON.stringify(frame.body)}`);
+          ws.close();
+        }
+        return;
+      }
+
+      // Handle pong
+      if (cmd === 'pong' || cmd === 'ping') {
+        return;
+      }
+
+      // Handle message/event callbacks
+      if (cmd === 'aibot_msg_callback' || cmd === 'aibot_event_callback') {
+        processCallback(frame).catch(err => {
+          console.error(`[wecom] Callback processing error: ${err.message}`);
+        });
+        return;
+      }
+
+      // Handle send/respond acknowledgements
+      if (cmd === 'aibot_respond_msg' || cmd === 'aibot_send_msg') {
+        if (frame.body?.code && frame.body.code !== 0) {
+          console.error(`[wecom] Send error (${cmd}): ${JSON.stringify(frame.body)}`);
+        }
+        return;
+      }
+
+      // Log unknown frames
+      console.log(`[wecom] Unknown frame: ${cmd}`);
+    } catch (err) {
+      console.error(`[wecom] Failed to parse message: ${err.message}`);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    authenticated = false;
+    stopHeartbeat();
+    const reasonStr = reason?.toString() || 'unknown';
+    console.log(`[wecom] WebSocket closed: ${code} ${reasonStr}`);
+    scheduleReconnect();
+  });
+
+  ws.on('error', (err) => {
+    // Suppress expected close errors
+    if (err.message?.includes('WebSocket was closed') || isShuttingDown) return;
+    console.error(`[wecom] WebSocket error: ${err.message}`);
+  });
+}
+
+function scheduleReconnect() {
+  if (isShuttingDown) return;
+  if (reconnectTimer) return;
+
+  const maxDelay = config.ws?.reconnect_max_delay || 30000;
+  const delay = Math.min(reconnectDelay, maxDelay);
+
+  // Add jitter (±25%)
+  const jitter = delay * (0.75 + Math.random() * 0.5);
+  const actualDelay = Math.round(jitter);
+
+  console.log(`[wecom] Reconnecting in ${Math.round(actualDelay / 1000)}s...`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
+    connect();
+  }, actualDelay);
+}
+
+// ============================================================
+// Internal HTTP API (for send.js communication)
+// ============================================================
+function startInternalServer() {
+  const port = config.internal_port || 4459;
+
+  internalServer = http.createServer((req, res) => {
+    // Auth check
+    if (req.headers['x-internal-token'] !== INTERNAL_SECRET) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid internal token' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        handleInternalRequest(req.url, data, res);
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      }
+    });
+  });
+
+  internalServer.listen(port, '127.0.0.1', () => {
+    console.log(`[wecom] Internal API on 127.0.0.1:${port}`);
+  });
+}
+
+function handleInternalRequest(url, data, res) {
+  if (url === '/internal/send') {
+    const { target, msgId, content } = data;
+    if (!target || !content) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing target or content' }));
+      return;
+    }
+
+    const ok = sendMessage(target, msgId, content);
+    res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok }));
+
+  } else if (url === '/internal/record-outgoing') {
+    const { chatId, text } = data;
+    if (!chatId || !text) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing chatId or text' }));
+      return;
+    }
+
+    recordHistoryEntry(String(chatId), {
+      msgId: `out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId: 'bot',
+      userName: 'bot',
+      text: String(text).slice(0, 4000),
+      timestamp: new Date().toISOString()
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+
+  } else {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  }
+}
 
 // ============================================================
 // Startup
 // ============================================================
-const port = config.webhook_port || 3459;
-const internalPort = port + 1000; // e.g., 4459
+startInternalServer();
+connect();
 
-webhookServer = app.listen(port, () => {
-  console.log(`[wecom] Webhook server listening on port ${port}`);
-  console.log(`[wecom] Webhook URL: http://0.0.0.0:${port}/webhook`);
-});
-
-const internalServer = internalApp.listen(internalPort, '127.0.0.1', () => {
-  console.log(`[wecom] Internal API on 127.0.0.1:${internalPort}`);
-});
+console.log(`[wecom] Bot ID: ${creds.bot_id.substring(0, 8)}...`);
 
 // ============================================================
 // Graceful shutdown
@@ -657,17 +776,24 @@ async function shutdown() {
 
   // Clear intervals
   clearInterval(dedupCleanupInterval);
+  clearInterval(reqCleanupInterval);
   clearInterval(userCachePersistInterval);
+  stopHeartbeat();
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
   // Persist user cache
   persistUserCache();
 
-  // Close servers
-  if (webhookServer) {
-    webhookServer.close(() => {
-      console.log('[wecom] Webhook server closed');
-    });
+  // Close WebSocket
+  if (ws) {
+    try { ws.close(1000, 'shutdown'); } catch {}
   }
+
+  // Close internal server
   if (internalServer) {
     internalServer.close(() => {
       console.log('[wecom] Internal server closed');
@@ -687,7 +813,6 @@ process.on('SIGTERM', shutdown);
 process.on('uncaughtException', (err) => {
   console.error(`[wecom] Uncaught exception: ${err.message}`);
   console.error(err.stack);
-  // Don't crash on uncaught exceptions in production
 });
 
 process.on('unhandledRejection', (reason) => {

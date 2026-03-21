@@ -16,24 +16,23 @@
 
 ## Features
 
-- **Webhook Integration** -- Receive WeCom messages via encrypted webhook callbacks
-- **WeCom Encryption** -- Full AES-256-CBC encryption/decryption per WeCom specification
-- **Message Types** -- Text, markdown, image, file sending and receiving
-- **Media Handling** -- Upload and download media via WeCom temporary media API
+- **WebSocket Long Connection** -- Connects via WeCom Intelligent Robot (智能机器人) WebSocket protocol
+- **No Public IP Needed** -- Outbound WebSocket connection, no callback URL or SSL required
+- **Simple Credentials** -- Only Bot ID + Secret (2 values, no corp secret / token / AES key)
+- **Message Types** -- Text and markdown sending; text, image, voice, video, file receiving
 - **Access Control** -- DM policy (open/allowlist/owner) and group policy with per-group configuration
 - **Owner Auto-Binding** -- First private message sender becomes the owner
 - **Context Tracking** -- In-memory chat history for contextual conversations
+- **Auto Reconnect** -- Exponential backoff with jitter on connection loss
 - **C4 Bridge** -- Standard Zylos communication bridge integration
 - **Admin CLI** -- Configuration management without manual JSON editing
 - **Hot Reload** -- Config changes take effect without restart (most settings)
-- **Graceful Shutdown** -- Clean resource cleanup on SIGINT/SIGTERM
 
 ## Prerequisites
 
 - Node.js >= 20.0.0
 - A WeCom (企业微信) enterprise account
-- A self-built application with message receiving enabled
-- Public HTTPS URL for webhook callbacks
+- Admin access to create an Intelligent Robot (智能机器人)
 
 ## Quick Start
 
@@ -50,26 +49,22 @@ npm install
 node hooks/post-install.js
 ```
 
-### 2. Configure Credentials
+### 2. Create Robot in WeCom
+
+1. Open WeCom client > Workbench > Intelligent Robot > Create Robot
+2. Select **API Mode Creation** (requires admin)
+3. Select **Long Connection** (长连接)
+4. Copy the **Bot ID** (format: `aibXXX`) and **Secret**
+5. Secret is shown only once -- save it immediately
+
+### 3. Configure Credentials
 
 Add to `~/zylos/.env`:
 
 ```bash
-WECOM_CORP_ID=ww...
-WECOM_CORP_SECRET=your_corp_secret
-WECOM_AGENT_ID=1000002
-WECOM_TOKEN=your_callback_token
-WECOM_ENCODING_AES_KEY=your_43_char_encoding_aes_key
+WECOM_BOT_ID=aibxxxxxxxxxxxxxxxx
+WECOM_BOT_SECRET=your_bot_secret
 ```
-
-### 3. WeCom Console Setup
-
-1. Go to [WeCom Admin Console](https://work.weixin.qq.com)
-2. Create a self-built application (自建应用)
-3. In the app settings, enable "Receive Messages" (接收消息):
-   - Set callback URL: `https://your-domain.com/wecom/webhook`
-   - Set Token and EncodingAESKey (same as in .env)
-4. Note the AgentId and Secret
 
 ### 4. Start Service
 
@@ -91,15 +86,19 @@ Send a message to your WeCom bot. The first private message sender becomes the o
 ```json
 {
   "enabled": true,
-  "webhook_port": 3459,
-  "bot": { "agent_id": 0 },
+  "internal_port": 4459,
   "owner": { "bound": false, "user_id": "", "name": "" },
   "dmPolicy": "owner",
   "dmAllowFrom": [],
   "groupPolicy": "allowlist",
   "groups": {},
-  "proxy": { "enabled": false, "host": "", "port": 0 },
-  "message": { "context_messages": 10, "useMarkdownCard": false }
+  "message": { "context_messages": 10, "useMarkdown": false },
+  "ws": {
+    "url": "wss://openws.work.weixin.qq.com",
+    "heartbeat_interval": 30000,
+    "reconnect_initial_delay": 1000,
+    "reconnect_max_delay": 30000
+  }
 }
 ```
 

@@ -208,7 +208,7 @@ const commands = {
     const enabled = value === 'on' || value === 'true';
     const config = loadConfig();
     if (!config.message) config.message = {};
-    config.message.useMarkdownCard = enabled;
+    config.message.useMarkdown = enabled;
     saveConfigOrExit(config);
     console.log(`Markdown messages: ${enabled ? 'ON' : 'OFF'}`);
     console.log('Config hot-reloads, no restart needed.');
@@ -216,7 +216,7 @@ const commands = {
 
   'help': () => {
     console.log(`
-zylos-wecom admin CLI
+zylos-wecom admin CLI (WebSocket Bot mode)
 
 Commands:
   show                                Show full config
@@ -250,11 +250,11 @@ After changes, restart bot: pm2 restart zylos-wecom
 };
 
 // Main
-const args = process.argv.slice(2);
-const command = args[0] || 'help';
+const cliArgs = process.argv.slice(2);
+const command = cliArgs[0] || 'help';
 
 if (commands[command]) {
-  commands[command](...args.slice(1));
+  commands[command](...cliArgs.slice(1));
 } else {
   console.error(`Unknown command: ${command}`);
   commands.help();

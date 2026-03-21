@@ -22,10 +22,7 @@ const ENV_FILE = path.join(HOME, 'zylos/.env');
 // Minimal initial config - full defaults are in src/lib/config.js
 const INITIAL_CONFIG = {
   enabled: true,
-  webhook_port: 3459,
-  bot: {
-    agent_id: 0
-  },
+  internal_port: 4459,
   owner: {
     bound: false,
     user_id: '',
@@ -35,14 +32,15 @@ const INITIAL_CONFIG = {
   dmAllowFrom: [],
   groupPolicy: 'allowlist',
   groups: {},
-  proxy: {
-    enabled: false,
-    host: '',
-    port: 0
-  },
   message: {
     context_messages: 10,
-    useMarkdownCard: false
+    useMarkdown: false
+  },
+  ws: {
+    url: 'wss://openws.work.weixin.qq.com',
+    heartbeat_interval: 30000,
+    reconnect_initial_delay: 1000,
+    reconnect_max_delay: 30000
   }
 };
 
@@ -73,11 +71,8 @@ try {
 } catch (e) {}
 
 const requiredVars = [
-  'WECOM_CORP_ID',
-  'WECOM_CORP_SECRET',
-  'WECOM_AGENT_ID',
-  'WECOM_TOKEN',
-  'WECOM_ENCODING_AES_KEY'
+  'WECOM_BOT_ID',
+  'WECOM_BOT_SECRET'
 ];
 
 const missing = [];
@@ -94,35 +89,21 @@ if (missing.length > 0) {
   console.log('  All required credentials found.');
 }
 
-// Read domain from zylos config for webhook URL display
-let webhookUrl = 'https://<your-domain>/wecom/webhook';
-try {
-  const zylosConfig = JSON.parse(fs.readFileSync(path.join(HOME, 'zylos/.zylos/config.json'), 'utf8'));
-  if (zylosConfig.domain) {
-    const protocol = zylosConfig.protocol || 'https';
-    webhookUrl = `${protocol}://${zylosConfig.domain}/wecom/webhook`;
-  }
-} catch (e) {}
-
 console.log('\n[post-install] Complete!');
 
 console.log('\n========================================');
 console.log('  WeCom (企业微信) Setup -- Remaining Steps');
 console.log('========================================');
 console.log('');
-console.log('In the WeCom admin console: work.weixin.qq.com');
+console.log('In the WeCom client:');
 console.log('');
-console.log('1. Create or select a self-built application (自建应用)');
-console.log('2. Note the AgentId and Secret');
-console.log('3. In "Receive Messages" (接收消息) settings:');
-console.log(`   - Callback URL: ${webhookUrl}`);
-console.log('   - Set Token and EncodingAESKey');
-console.log('4. Add the following to ~/zylos/.env:');
-console.log('   WECOM_CORP_ID=ww...');
-console.log('   WECOM_CORP_SECRET=your_secret');
-console.log('   WECOM_AGENT_ID=1000002');
-console.log('   WECOM_TOKEN=your_token');
-console.log('   WECOM_ENCODING_AES_KEY=your_43_char_key');
+console.log('1. Go to Workbench > Intelligent Robot > Create Robot');
+console.log('2. Select API Mode Creation (requires admin)');
+console.log('3. Select Long Connection (长连接)');
+console.log('4. Copy Bot ID and Secret (Secret shown only once!)');
+console.log('5. Add the following to ~/zylos/.env:');
+console.log('   WECOM_BOT_ID=aibxxxxxxxxxxxxxxxx');
+console.log('   WECOM_BOT_SECRET=your_bot_secret');
 console.log('');
 console.log('First private message to the bot will auto-bind the sender as owner.');
 console.log('========================================');

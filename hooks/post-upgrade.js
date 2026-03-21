@@ -6,7 +6,7 @@
  * CLI handles: stop service, backup, file sync, npm install, manifest.
  *
  * This hook handles component-specific migrations:
- * - Config schema migrations
+ * - Config schema migrations (including v0.1.x -> v0.2.x WebSocket migration)
  * - Data format updates
  *
  * Note: Service restart is handled by Claude after this hook.
@@ -39,78 +39,99 @@ if (fs.existsSync(configPath)) {
       migrations.push('Added enabled field');
     }
 
-    // Migration 2: Ensure webhook_port
-    if (config.webhook_port === undefined) {
-      config.webhook_port = 3459;
+    // Migration 2: Remove old webhook_port (replaced by internal_port)
+    if (config.webhook_port !== undefined) {
+      delete config.webhook_port;
       migrated = true;
-      migrations.push('Added webhook_port');
+      migrations.push('Removed webhook_port (WebSocket mode)');
     }
 
-    // Migration 3: Ensure bot settings
-    if (!config.bot) {
-      config.bot = { agent_id: 0 };
+    // Migration 3: Ensure internal_port
+    if (config.internal_port === undefined) {
+      config.internal_port = 4459;
       migrated = true;
-      migrations.push('Added bot settings');
+      migrations.push('Added internal_port=4459');
     }
 
-    // Migration 4: Ensure owner structure
+    // Migration 4: Remove old bot.agent_id (not used in WebSocket mode)
+    if (config.bot) {
+      delete config.bot;
+      migrated = true;
+      migrations.push('Removed bot config (WebSocket mode)');
+    }
+
+    // Migration 5: Remove old proxy config (not used in WebSocket mode)
+    if (config.proxy) {
+      delete config.proxy;
+      migrated = true;
+      migrations.push('Removed proxy config (WebSocket mode)');
+    }
+
+    // Migration 6: Ensure owner structure
     if (!config.owner) {
       config.owner = { bound: false, user_id: '', name: '' };
       migrated = true;
       migrations.push('Added owner structure');
     }
 
-    // Migration 5: Ensure dmPolicy
+    // Migration 7: Ensure dmPolicy
     if (config.dmPolicy === undefined) {
       config.dmPolicy = 'owner';
       migrated = true;
       migrations.push('Added dmPolicy=owner');
     }
 
-    // Migration 6: Ensure dmAllowFrom
+    // Migration 8: Ensure dmAllowFrom
     if (config.dmAllowFrom === undefined) {
       config.dmAllowFrom = [];
       migrated = true;
       migrations.push('Added dmAllowFrom');
     }
 
-    // Migration 7: Ensure groupPolicy
+    // Migration 9: Ensure groupPolicy
     if (config.groupPolicy === undefined) {
       config.groupPolicy = 'allowlist';
       migrated = true;
       migrations.push('Added groupPolicy=allowlist');
     }
 
-    // Migration 8: Ensure groups map
+    // Migration 10: Ensure groups map
     if (config.groups === undefined) {
       config.groups = {};
       migrated = true;
       migrations.push('Added groups map');
     }
 
-    // Migration 9: Ensure proxy settings
-    if (!config.proxy) {
-      config.proxy = { enabled: false, host: '', port: 0 };
-      migrated = true;
-      migrations.push('Added proxy settings');
-    }
-
-    // Migration 10: Ensure message settings
+    // Migration 11: Ensure message settings
     if (!config.message) {
-      config.message = { context_messages: 10, useMarkdownCard: false };
+      config.message = { context_messages: 10, useMarkdown: false };
       migrated = true;
       migrations.push('Added message settings');
     } else {
-      if (config.message.context_messages === undefined) {
-        config.message.context_messages = 10;
+      // Migrate useMarkdownCard -> useMarkdown
+      if (config.message.useMarkdownCard !== undefined) {
+        config.message.useMarkdown = config.message.useMarkdownCard;
+        delete config.message.useMarkdownCard;
         migrated = true;
-        migrations.push('Added message.context_messages');
+        migrations.push('Renamed useMarkdownCard -> useMarkdown');
       }
-      if (config.message.useMarkdownCard === undefined) {
-        config.message.useMarkdownCard = false;
+      if (config.message.useMarkdown === undefined) {
+        config.message.useMarkdown = false;
         migrated = true;
-        migrations.push('Added message.useMarkdownCard');
+        migrations.push('Added message.useMarkdown');
       }
+    }
+
+    // Migration 12: Ensure ws settings
+    if (!config.ws) {
+      config.ws = {
+        url: 'wss://openws.work.weixin.qq.com',
+        heartbeat_interval: 30000,
+        reconnect_initial_delay: 1000,
+        reconnect_max_delay: 30000
+      };
+      migrated = true;
+      migrations.push('Added ws settings');
     }
 
     // Save if migrated
@@ -127,6 +148,18 @@ if (fs.existsSync(configPath)) {
   }
 } else {
   console.log('No config file found, skipping migrations.');
+}
+
+// Check for new env vars
+console.log('\nChecking environment variables...');
+const envFile = path.join(HOME, 'zylos/.env');
+let envContent = '';
+try { envContent = fs.readFileSync(envFile, 'utf8'); } catch {}
+
+if (!envContent.includes('WECOM_BOT_ID') || !envContent.includes('WECOM_BOT_SECRET')) {
+  console.log('  WARNING: WECOM_BOT_ID and WECOM_BOT_SECRET are required for WebSocket mode.');
+  console.log('  Add them to ~/zylos/.env before starting the service.');
+  console.log('  (Old WECOM_CORP_* vars are no longer used)');
 }
 
 console.log('\n[post-upgrade] Complete!');

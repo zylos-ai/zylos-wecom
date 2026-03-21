@@ -1,14 +1,15 @@
 ---
 name: wecom
-version: 0.1.0
+version: 0.2.0
 description: >-
-  WeCom (企业微信) communication channel. Receives webhook events and sends messages
-  via WeCom REST API. Use when: (1) replying to WeCom messages (DM or group),
-  (2) sending proactive messages or media (images, files) to WeCom users,
+  WeCom (企业微信) communication channel via WebSocket long connection
+  (智能机器人长连接模式). No public IP or SSL required. Use when:
+  (1) replying to WeCom messages (DM or group),
+  (2) sending proactive messages to WeCom users,
   (3) managing DM access control (dmPolicy: open/allowlist/owner, dmAllowFrom list),
   (4) managing group access control (groupPolicy, per-group allowFrom),
-  (5) configuring the bot (admin CLI, markdown settings, agent ID),
-  (6) troubleshooting WeCom webhook or message delivery issues.
+  (5) configuring the bot (admin CLI, markdown settings),
+  (6) troubleshooting WeCom connection or message delivery issues.
   Config at ~/zylos/components/wecom/config.json. Service: pm2 zylos-wecom.
 type: communication
 
@@ -34,27 +35,13 @@ upgrade:
 
 config:
   required:
-    - name: WECOM_CORP_ID
-      description: "Corp ID (企业ID, from WeCom admin console)"
-    - name: WECOM_CORP_SECRET
-      description: "Corp Secret (应用Secret)"
-      sensitive: true
-    - name: WECOM_AGENT_ID
-      description: "Agent ID (应用AgentId)"
-    - name: WECOM_TOKEN
-      description: "Webhook verification token (回调Token)"
-      sensitive: true
-    - name: WECOM_ENCODING_AES_KEY
-      description: "Encoding AES Key (回调EncodingAESKey, 43 chars)"
+    - name: WECOM_BOT_ID
+      description: "Bot ID (智能机器人 Bot ID, format: aibXXX)"
+    - name: WECOM_BOT_SECRET
+      description: "Bot Secret (智能机器人 Secret)"
       sensitive: true
 
-next-steps: "BEFORE starting the service: 1) Ensure all WECOM_* env vars are set in ~/zylos/.env. 2) In WeCom admin console (work.weixin.qq.com), create a self-built app. 3) Set the app's callback URL to https://<your-domain>/wecom/webhook. 4) Copy Token and EncodingAESKey from the callback config to .env. 5) Enable 'receive messages' API. 6) Start the service (pm2 restart zylos-wecom). First DM to the bot will auto-bind the sender as owner."
-
-http_routes:
-  - path: /wecom/webhook
-    type: reverse_proxy
-    target: localhost:3459
-    strip_prefix: /wecom
+next-steps: "BEFORE starting the service: 1) Ensure WECOM_BOT_ID and WECOM_BOT_SECRET are set in ~/zylos/.env. 2) In WeCom client, go to Workbench > Intelligent Robot > Create Robot > API Mode > Long Connection. 3) Copy the Bot ID and Secret to .env. 4) Start the service (pm2 restart zylos-wecom). First DM to the bot will auto-bind the sender as owner."
 
 dependencies:
   - comm-bridge
@@ -63,6 +50,7 @@ dependencies:
 # WeCom
 
 WeCom (企业微信) communication channel for zylos.
+Uses WebSocket long connection mode (智能机器人长连接) — no public IP, no SSL, no callback URL needed.
 
 Depends on: comm-bridge (C4 message routing).
 
@@ -71,12 +59,6 @@ Depends on: comm-bridge (C4 message routing).
 ```bash
 # Via C4 bridge (standard path)
 node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "wecom" "<user_id>" "Hello!"
-
-# Send image
-node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "wecom" "<user_id>" "[MEDIA:image]/path/to/image.png"
-
-# Send file
-node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "wecom" "<user_id>" "[MEDIA:file]/path/to/file.pdf"
 ```
 
 Direct send (bypasses C4 logging, for testing only):
@@ -122,33 +104,30 @@ After changes, restart: `pm2 restart zylos-wecom`
 
 ## WeCom Setup
 
-### 1. Credentials
+### 1. Create Intelligent Robot
+
+In the WeCom client:
+
+1. Go to **Workbench** (工作台) > **Intelligent Robot** (智能机器人) > **Create Robot**
+2. Fill in name, avatar, description
+3. Select **API Mode Creation** (API模式创建) — requires admin permissions
+4. Select **Long Connection** (使用长连接)
+5. Copy the **Bot ID** (format: `aibXXX`) and **Secret**
+6. **Secret is shown only once** — save it immediately
+
+### 2. Credentials
 
 Add to `~/zylos/.env`:
 
 ```bash
-WECOM_CORP_ID=ww...
-WECOM_CORP_SECRET=your_corp_secret
-WECOM_AGENT_ID=1000002
-WECOM_TOKEN=your_callback_token
-WECOM_ENCODING_AES_KEY=your_43_char_encoding_aes_key
+WECOM_BOT_ID=aibxxxxxxxxxxxxxxxx
+WECOM_BOT_SECRET=your_bot_secret
 ```
-
-### 2. WeCom Admin Console
-
-In the WeCom admin console (work.weixin.qq.com):
-
-1. Create a self-built application (自建应用)
-2. Note the AgentId and Secret
-3. In "Receive Messages" (接收消息) settings:
-   - Set callback URL: `https://<your-domain>/wecom/webhook`
-   - Set Token and EncodingAESKey (copy to .env)
-4. Enable message receiving API
 
 ### 3. Message Types
 
-Supported incoming: text, image, voice, video, file
-Supported outgoing: text, markdown, image, file
+Supported incoming: text, image, voice (auto-transcribed), video, file, mixed
+Supported outgoing: text, markdown
 
 ## Owner
 
