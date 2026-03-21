@@ -177,7 +177,7 @@ async function internalSend(target, msgId, content) {
 
     const result = await res.json();
     if (!result.ok) {
-      throw new Error('Internal send returned not ok');
+      throw new Error(result.error || 'Internal send returned not ok');
     }
     return true;
   } finally {

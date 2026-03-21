@@ -35,7 +35,7 @@ export const DEFAULT_CONFIG = {
   // Message settings
   message: {
     context_messages: 10,
-    useMarkdown: false
+    welcome_text: ''  // empty = forward enter_chat to C4; non-empty = auto-reply
   },
   // WebSocket settings
   ws: {

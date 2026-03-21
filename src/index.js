@@ -34,6 +34,7 @@ let heartbeatTimer = null;
 let internalServer = null;
 let reconnectDelay = 1000;
 let authenticated = false;
+let subscribeReqId = null; // Track subscribe req_id for auth response matching
 
 // Initialize
 let config = getConfig();
@@ -128,15 +129,35 @@ function getRequest(msgId) {
   return entry;
 }
 
-// Also track by target for proactive sends
-const activatedTargets = new Map(); // target -> chatId (for proactive sends)
+// Also track by target for proactive sends (with TTL to prevent memory leak)
+const ACTIVATED_TARGET_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const activatedTargets = new Map(); // target -> { chatId, updatedAt }
 
 const reqCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [id, entry] of pendingRequests) {
     if (now - entry.receivedAt > REQ_ID_TTL) pendingRequests.delete(id);
   }
+  // Clean up stale activated targets
+  for (const [target, entry] of activatedTargets) {
+    if (now - entry.updatedAt > ACTIVATED_TARGET_TTL) activatedTargets.delete(target);
+  }
 }, 60 * 1000);
+
+// ============================================================
+// Outbound send tracking (Promise-based delivery confirmation)
+// ============================================================
+const SEND_TIMEOUT = 10000; // 10 seconds
+const pendingSends = new Map(); // reqId -> { resolve, timer }
+
+function resolvePendingSend(reqId, ok, errorMsg) {
+  const pending = pendingSends.get(reqId);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingSends.delete(reqId);
+    pending.resolve({ ok, error: errorMsg || null });
+  }
+}
 
 // ============================================================
 // User name cache with TTL
@@ -273,7 +294,7 @@ function checkDmPermission(userId) {
   }
 }
 
-function checkGroupPermission(chatId, userId) {
+function checkGroupPermission(chatId, userId, isMentioned) {
   const policy = config.groupPolicy || 'allowlist';
   if (isOwner(userId)) return true;
   switch (policy) {
@@ -282,6 +303,10 @@ function checkGroupPermission(chatId, userId) {
     case 'allowlist': {
       const groupConfig = config.groups?.[chatId];
       if (!groupConfig) return false;
+      // Check mode: "mention" requires @bot mention, "smart" receives all
+      const mode = groupConfig.mode || 'mention';
+      if (mode === 'mention' && !isMentioned) return false;
+      // Check allowFrom sender restriction
       if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
         if (groupConfig.allowFrom.includes('*')) return true;
         return groupConfig.allowFrom.some(id => String(id) === String(userId));
@@ -315,9 +340,10 @@ function tryBindOwner(userId, userName) {
 // WebSocket frame builders
 // ============================================================
 function buildSubscribe() {
+  subscribeReqId = crypto.randomUUID();
   return JSON.stringify({
     cmd: 'aibot_subscribe',
-    headers: { req_id: crypto.randomUUID() },
+    headers: { req_id: subscribeReqId },
     body: {
       bot_id: creds.bot_id,
       secret: creds.secret
@@ -351,7 +377,11 @@ function buildSendMsg(chatId, msgtype, body) {
 // ============================================================
 // WebSocket message sending
 // ============================================================
-function wsSend(data) {
+
+/**
+ * Low-level send without delivery tracking (for ping, subscribe, welcome).
+ */
+function wsSendRaw(data) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     console.error('[wecom] WebSocket not connected, cannot send');
     return false;
@@ -366,11 +396,38 @@ function wsSend(data) {
 }
 
 /**
+ * Send a frame and wait for server ack/nack. Returns Promise<{ok, error}>.
+ * Tracks the outbound req_id and resolves when server responds.
+ */
+function wsSend(data, reqId) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) {
+    return Promise.resolve({ ok: false, error: 'WebSocket not ready' });
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingSends.delete(reqId);
+      resolve({ ok: true, timeout: true }); // Assume success on timeout (most succeed)
+    }, SEND_TIMEOUT);
+
+    pendingSends.set(reqId, { resolve, timer });
+
+    try {
+      ws.send(data);
+    } catch (err) {
+      clearTimeout(timer);
+      pendingSends.delete(reqId);
+      resolve({ ok: false, error: err.message });
+    }
+  });
+}
+
+/**
  * Send a reply to a message callback (using original reqId).
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_respond_msg.
  */
 function sendReply(reqId, text) {
-  return wsSend(buildRespondMsg(reqId, 'markdown', { markdown: { content: text } }));
+  const data = buildRespondMsg(reqId, 'markdown', { markdown: { content: text } });
+  return wsSend(data, reqId);
 }
 
 /**
@@ -378,11 +435,14 @@ function sendReply(reqId, text) {
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_send_msg.
  */
 function sendProactive(chatId, text) {
-  return wsSend(buildSendMsg(chatId, 'markdown', { markdown: { content: text } }));
+  const data = buildSendMsg(chatId, 'markdown', { markdown: { content: text } });
+  const parsed = JSON.parse(data);
+  return wsSend(data, parsed.headers.req_id);
 }
 
 /**
  * Send a message to target, using reply mode if possible, falling back to proactive.
+ * Returns Promise<{ok, error}>.
  */
 function sendMessage(target, msgId, text) {
   // Try reply mode first (using tracked reqId)
@@ -395,9 +455,8 @@ function sendMessage(target, msgId, text) {
   }
 
   // Fallback: proactive send
-  // For proactive sends, we need the chatId
-  // For DMs, chatId = userId; for groups, chatId = group chatId
-  const chatId = activatedTargets.get(target) || target;
+  const entry = activatedTargets.get(target);
+  const chatId = entry?.chatId || target;
   console.log(`[wecom] Sending proactive to chatId: ${chatId}`);
   return sendProactive(chatId, text);
 }
@@ -437,16 +496,21 @@ async function processCallback(frame) {
     const senderName = fromName || getCachedUserName(fromUser);
     const isGroup = chatType === 'group';
 
-    // Track activated target for proactive sends
+    // Track activated target for proactive sends (store actual chatId)
+    const now = Date.now();
     if (isGroup && chatId) {
-      activatedTargets.set(chatId, chatId);
+      activatedTargets.set(chatId, { chatId, updatedAt: now });
+    } else if (chatId) {
+      activatedTargets.set(fromUser, { chatId, updatedAt: now });
     } else {
-      activatedTargets.set(fromUser, fromUser);
+      activatedTargets.set(fromUser, { chatId: fromUser, updatedAt: now });
     }
 
     // Permission check
+    // For groups, detect if bot was @mentioned (used for mention mode filtering)
+    const isMentioned = isGroup && aibotId && body?.text?.content?.includes(`@${aibotId}`);
     if (isGroup) {
-      if (!checkGroupPermission(chatId, fromUser)) {
+      if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
         console.log(`[wecom] Group message from ${senderName} in ${chatId} blocked by policy`);
         return;
       }
@@ -501,9 +565,9 @@ async function processCallback(frame) {
 
     if (!textContent) return;
 
-    // Strip @bot mention prefix from group messages
-    if (isGroup) {
-      textContent = textContent.replace(/^@\S+\s*/, '');
+    // Strip @bot mention from group messages (only strip the bot's own mention)
+    if (isGroup && aibotId) {
+      textContent = textContent.replace(new RegExp(`@${aibotId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'g'), '').trim();
     }
 
     // Record to history
@@ -553,13 +617,17 @@ async function processCallback(frame) {
     if (eventType === 'enter_chat') {
       const reqId = headers?.req_id;
       if (reqId) {
-        // Send welcome message if configured
-        const welcomeText = '你好！有什么可以帮你的？';
-        wsSend(JSON.stringify({
-          cmd: 'aibot_respond_welcome_msg',
-          headers: { req_id: reqId },
-          body: { msgtype: 'text', text: { content: welcomeText } }
-        }));
+        const welcomeText = config.message?.welcome_text;
+        if (welcomeText) {
+          // Auto-reply with configured welcome message
+          wsSendRaw(JSON.stringify({
+            cmd: 'aibot_respond_welcome_msg',
+            headers: { req_id: reqId },
+            body: { msgtype: 'text', text: { content: welcomeText } }
+          }));
+        }
+        // If welcome_text is empty, the event is silently ignored
+        // (Claude handles greetings via normal message flow)
       }
     }
   }
@@ -573,7 +641,7 @@ function startHeartbeat() {
   const interval = config.ws?.heartbeat_interval || 30000;
   heartbeatTimer = setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      wsSend(buildPing());
+      wsSendRaw(buildPing());
     }
   }, interval);
 }
@@ -595,33 +663,27 @@ function connect() {
 
   ws.on('open', () => {
     console.log('[wecom] WebSocket connected, authenticating...');
-    ws.send(buildSubscribe());
+    wsSendRaw(buildSubscribe());
   });
 
   ws.on('message', (data) => {
     try {
       const frame = JSON.parse(data.toString());
       const cmd = frame.cmd;
+      const frameReqId = frame.headers?.req_id;
 
-      // Handle authentication response
-      // WeCom returns: {"headers":{"req_id":"..."},"errcode":0,"errmsg":"ok"} (no cmd field)
-      if (cmd === 'aibot_subscribe' || (!cmd && frame.errcode !== undefined && !authenticated)) {
+      // Handle authentication response (match by saved subscribeReqId)
+      if (cmd === 'aibot_subscribe' || (!cmd && frameReqId === subscribeReqId && !authenticated)) {
         if (frame.errcode === 0 || frame.body?.code === 0) {
           authenticated = true;
+          subscribeReqId = null;
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
           console.log('[wecom] Authenticated successfully');
           startHeartbeat();
         } else {
           console.error(`[wecom] Authentication failed: ${JSON.stringify(frame)}`);
+          subscribeReqId = null;
           ws.close();
-        }
-        return;
-      }
-
-      // Handle generic error responses (no cmd field, already authenticated)
-      if (!cmd && frame.errcode !== undefined && authenticated) {
-        if (frame.errcode !== 0) {
-          console.error(`[wecom] Send error: ${JSON.stringify(frame)}`);
         }
         return;
       }
@@ -639,11 +701,23 @@ function connect() {
         return;
       }
 
-      // Handle send/respond acknowledgements
+      // Handle send/respond acknowledgements (resolve pending send promises)
       if (cmd === 'aibot_respond_msg' || cmd === 'aibot_send_msg') {
-        if (frame.body?.code && frame.body.code !== 0) {
+        const ok = !frame.body?.code || frame.body.code === 0;
+        if (!ok) {
           console.error(`[wecom] Send error (${cmd}): ${JSON.stringify(frame.body)}`);
         }
+        if (frameReqId) resolvePendingSend(frameReqId, ok, ok ? null : frame.body?.msg);
+        return;
+      }
+
+      // Handle generic responses without cmd (e.g., error frames)
+      if (!cmd && frame.errcode !== undefined && frameReqId) {
+        const ok = frame.errcode === 0;
+        if (!ok) {
+          console.error(`[wecom] Send error: ${JSON.stringify(frame)}`);
+        }
+        resolvePendingSend(frameReqId, ok, ok ? null : frame.errmsg);
         return;
       }
 
@@ -656,7 +730,14 @@ function connect() {
 
   ws.on('close', (code, reason) => {
     authenticated = false;
+    subscribeReqId = null;
     stopHeartbeat();
+    // Reject all pending sends
+    for (const [reqId, pending] of pendingSends) {
+      clearTimeout(pending.timer);
+      pending.resolve({ ok: false, error: 'WebSocket closed' });
+    }
+    pendingSends.clear();
     const reasonStr = reason?.toString() || 'unknown';
     console.log(`[wecom] WebSocket closed: ${code} ${reasonStr}`);
     scheduleReconnect();
@@ -720,7 +801,7 @@ function startInternalServer() {
   });
 }
 
-function handleInternalRequest(url, data, res) {
+async function handleInternalRequest(url, data, res) {
   if (url === '/internal/send') {
     const { target, msgId, content } = data;
     if (!target || !content) {
@@ -729,9 +810,9 @@ function handleInternalRequest(url, data, res) {
       return;
     }
 
-    const ok = sendMessage(target, msgId, content);
-    res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok }));
+    const result = await sendMessage(target, msgId, content);
+    res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
 
   } else if (url === '/internal/record-outgoing') {
     const { chatId, text } = data;
