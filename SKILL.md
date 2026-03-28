@@ -258,7 +258,7 @@ mcporter list wecom-doc --output json
 
 或直接继续执行原来的 `mcporter call ...`
 
-如果用户反馈调用报 `850001`，默认按“尚未完成授权”处理，不要直接假设是别的故障。
+如果用户反馈调用报 `850001`，默认按“尚未完成授权”处理，不要直接假设是别的故障。如果调用文档能力拿到  ⁠850002 no authorization⁠ ，响应里带了  ⁠help_message，则把链接（含  ⁠str_aibotid=...⁠ ）的内容返回给用户，让用户点击授权.
 
 当用户提供 URL 或 JSON 配置后，提取 `url` 并执行：
 
