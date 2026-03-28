@@ -126,10 +126,19 @@ const dedupCleanupInterval = setInterval(() => {
 // Request ID tracking (for reply vs proactive send)
 // ============================================================
 const REQ_ID_TTL = 5 * 60 * 1000; // 5 minutes (WeCom stream timeout is 6 min)
-const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt }
+const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt, streamId, placeholderSent, placeholderSentAt }
 
 function trackRequest(msgId, reqId, chatId, userId, chatType) {
-  pendingRequests.set(String(msgId), { reqId, chatId, userId, chatType, receivedAt: Date.now() });
+  pendingRequests.set(String(msgId), {
+    reqId,
+    chatId,
+    userId,
+    chatType,
+    receivedAt: Date.now(),
+    streamId: `stream_${crypto.randomUUID()}`,
+    placeholderSent: false,
+    placeholderSentAt: 0,
+  });
 }
 
 function getRequest(msgId) {
@@ -163,6 +172,10 @@ const reqCleanupInterval = setInterval(() => {
 const SEND_TIMEOUT = 10000; // 10 seconds
 const pendingSends = new Map(); // reqId -> { resolve, timer }
 const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
+const MARKDOWN_MAX_BYTES = 2000;
+const STREAM_MAX_BYTES = 20480;
+const STREAM_PLACEHOLDER = '<think></think>';
+const STREAM_PLACEHOLDER_MIN_MS = 0;
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -241,6 +254,162 @@ function persistUserCache() {
 
 const userCachePersistInterval = setInterval(persistUserCache, 5 * 60 * 1000);
 loadUserCacheFromFile();
+
+// ============================================================
+// Media download helpers (WeCom WS encrypted file/image URLs)
+// ============================================================
+function sanitizeFilename(name, fallback = 'file.bin') {
+  const candidate = String(name || '').trim();
+  const base = path.basename(candidate || fallback);
+  const sanitized = base.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim();
+  return sanitized || fallback;
+}
+
+function parseFilenameFromHeaders(headers, fallback) {
+  const contentDisposition = headers.get('content-disposition') || '';
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;\s]+)/i);
+  if (utf8Match) {
+    try {
+      return sanitizeFilename(decodeURIComponent(utf8Match[1]), fallback);
+    } catch {}
+  }
+
+  const plainMatch = contentDisposition.match(/filename="?([^";\s]+)"?/i);
+  if (plainMatch) {
+    try {
+      return sanitizeFilename(decodeURIComponent(plainMatch[1]), fallback);
+    } catch {}
+  }
+
+  return sanitizeFilename(fallback, fallback);
+}
+
+function decryptMediaBuffer(encryptedBuffer, aesKey) {
+  if (!aesKey) return encryptedBuffer;
+
+  const key = Buffer.from(aesKey, 'base64');
+  const iv = key.subarray(0, 16);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+
+  // WeCom uses PKCS#7 padding to 32-byte boundaries, so strip manually.
+  decipher.setAutoPadding(false);
+  const decrypted = Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
+  const padLen = decrypted[decrypted.length - 1];
+
+  if (padLen < 1 || padLen > 32 || padLen > decrypted.length) {
+    throw new Error(`Invalid PKCS#7 padding: ${padLen}`);
+  }
+  for (let i = decrypted.length - padLen; i < decrypted.length; i++) {
+    if (decrypted[i] !== padLen) {
+      throw new Error('Invalid PKCS#7 padding bytes');
+    }
+  }
+
+  return decrypted.subarray(0, decrypted.length - padLen);
+}
+
+async function downloadIncomingMedia(url, aesKey, preferredName, fallbackPrefix, msgId) {
+  if (!url) return null;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const encryptedBuffer = Buffer.from(await response.arrayBuffer());
+  const buffer = decryptMediaBuffer(encryptedBuffer, aesKey);
+  const fallbackName = `${fallbackPrefix}_${String(msgId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const filename = parseFilenameFromHeaders(response.headers, preferredName || fallbackName);
+  const savePath = path.join(MEDIA_DIR, filename);
+
+  fs.writeFileSync(savePath, buffer);
+  return { path: savePath, filename, size: buffer.length };
+}
+
+function utf8ByteLength(text) {
+  return Buffer.byteLength(String(text || ''), 'utf8');
+}
+
+function sliceWithinUtf8Bytes(text, maxBytes) {
+  const input = String(text || '');
+  if (utf8ByteLength(input) <= maxBytes) return input;
+
+  let low = 0;
+  let high = input.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (utf8ByteLength(input.slice(0, mid)) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return input.slice(0, low);
+}
+
+function splitMessage(text, maxBytes) {
+  const input = String(text || '').trim();
+  if (!input) return [];
+  if (utf8ByteLength(input) <= maxBytes) return [input];
+
+  const chunks = [];
+  let remaining = input;
+
+  while (remaining.length > 0) {
+    if (utf8ByteLength(remaining) <= maxBytes) {
+      chunks.push(remaining);
+      break;
+    }
+
+    let candidate = sliceWithinUtf8Bytes(remaining, maxBytes);
+    if (!candidate) break;
+
+    let breakAt = candidate.length;
+    const fenceMatches = candidate.match(/```/g);
+    const insideCodeBlock = fenceMatches && fenceMatches.length % 2 !== 0;
+
+    if (insideCodeBlock) {
+      const lastFenceStart = candidate.lastIndexOf('```');
+      const lineBeforeFence = remaining.lastIndexOf('\n', lastFenceStart - 1);
+      if (lineBeforeFence > candidate.length * 0.2) {
+        breakAt = lineBeforeFence;
+      }
+    } else {
+      const lastParaBreak = candidate.lastIndexOf('\n\n');
+      if (lastParaBreak > candidate.length * 0.3) {
+        breakAt = lastParaBreak + 1;
+      } else {
+        const lastNewline = candidate.lastIndexOf('\n');
+        if (lastNewline > candidate.length * 0.3) {
+          breakAt = lastNewline;
+        } else {
+          const lastSpace = candidate.lastIndexOf(' ');
+          if (lastSpace > candidate.length * 0.3) {
+            breakAt = lastSpace;
+          }
+        }
+      }
+    }
+
+    const nextChunk = remaining.slice(0, breakAt).trim();
+    if (!nextChunk) {
+      const hardChunk = candidate.trim();
+      if (!hardChunk) break;
+      chunks.push(hardChunk);
+      remaining = remaining.slice(candidate.length).trim();
+      continue;
+    }
+
+    chunks.push(nextChunk);
+    remaining = remaining.slice(breakAt).trim();
+  }
+
+  return chunks;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // ============================================================
 // In-memory chat history for context
@@ -390,6 +559,28 @@ function buildRespondMsg(reqId, msgtype, body) {
   });
 }
 
+function buildRespondStream(reqId, streamId, content, finish = false, feedback) {
+  const stream = {
+    id: streamId,
+    finish,
+  };
+  if (String(content || '').trim()) {
+    stream.content = content;
+  }
+  if (feedback) {
+    stream.feedback = feedback;
+  }
+
+  return JSON.stringify({
+    cmd: 'aibot_respond_msg',
+    headers: { req_id: reqId },
+    body: {
+      msgtype: 'stream',
+      stream,
+    }
+  });
+}
+
 function buildSendMsg(chatId, msgtype, body) {
   return JSON.stringify({
     cmd: 'aibot_send_msg',
@@ -491,6 +682,35 @@ function sendReply(reqId, text) {
   return wsSend(data, reqId);
 }
 
+function sendReplyStream(reqId, streamId, text, finish = false, feedback) {
+  const data = buildRespondStream(reqId, streamId, text, finish, feedback);
+  return wsSend(data, reqId);
+}
+
+async function sendInitialReplyPlaceholder(msgId) {
+  const req = getRequest(msgId);
+  if (!req || req.placeholderSent) {
+    return { ok: true, mode: 'placeholder-skipped' };
+  }
+
+  const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
+  const result = await sendReplyStream(req.reqId, req.streamId, placeholder, false, { id: req.streamId });
+  if (result.ok) {
+    req.placeholderSent = true;
+    req.placeholderSentAt = Date.now();
+  }
+  return result;
+}
+
+async function finishPendingReplyPlaceholder(msgId) {
+  const req = getRequest(msgId);
+  if (!req || !req.placeholderSent) {
+    return { ok: true, mode: 'skip-no-placeholder' };
+  }
+
+  return sendReplyStream(req.reqId, req.streamId, '', true);
+}
+
 /**
  * Send a proactive message to a chat.
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_send_msg.
@@ -501,28 +721,104 @@ function sendProactive(chatId, text) {
   return wsSend(data, parsed.headers.req_id);
 }
 
+function resolveChatTarget(target) {
+  const entry = activatedTargets.get(target);
+  return entry?.chatId || target;
+}
+
+async function sendProactiveChunks(target, chunks) {
+  const chatId = resolveChatTarget(target);
+  for (let i = 0; i < chunks.length; i++) {
+    const result = await sendProactive(chatId, chunks[i]);
+    if (!result.ok) return result;
+    if (i < chunks.length - 1) {
+      await sleep(500);
+    }
+  }
+  return { ok: true, mode: 'proactive', chunks: chunks.length };
+}
+
+async function sendReplyThenProactive(target, req, chunks) {
+  if (chunks.length === 0) {
+    return { ok: true, mode: 'noop', chunks: 0 };
+  }
+
+  const first = await sendReply(req.reqId, chunks[0]);
+  if (!first.ok) {
+    console.log(`[wecom] Reply send failed, falling back to proactive: ${first.error || 'unknown error'}`);
+    return sendProactiveChunks(target, chunks);
+  }
+
+  if (chunks.length === 1) {
+    return { ok: true, mode: 'reply', chunks: 1 };
+  }
+
+  const restResult = await sendProactiveChunks(target, chunks.slice(1));
+  if (!restResult.ok) return restResult;
+  return { ok: true, mode: 'reply+proactive', chunks: chunks.length };
+}
+
+async function sendStreamReply(target, req, text) {
+  const streamId = req.streamId || `stream_${crypto.randomUUID()}`;
+  req.streamId = streamId;
+  const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
+  if (!req.placeholderSent) {
+    const started = await sendReplyStream(req.reqId, streamId, placeholder, false, { id: streamId });
+    if (!started.ok) {
+      return started;
+    }
+    req.placeholderSent = true;
+    req.placeholderSentAt = Date.now();
+  }
+
+  const placeholderMinMs = Number(config.message?.stream_placeholder_min_ms || STREAM_PLACEHOLDER_MIN_MS);
+  const elapsedMs = req.placeholderSentAt ? (Date.now() - req.placeholderSentAt) : placeholderMinMs;
+  if (placeholderMinMs > elapsedMs) {
+    await sleep(placeholderMinMs - elapsedMs);
+  }
+
+  const finished = await sendReplyStream(req.reqId, streamId, text, true);
+  if (finished.ok) {
+    return { ok: true, mode: 'stream', chunks: 1 };
+  }
+
+  console.log(`[wecom] Stream finish failed, falling back to proactive final send: ${finished.error || 'unknown error'}`);
+  const fallback = await sendProactiveChunks(target, [text]);
+  return fallback.ok ? { ok: true, mode: 'stream+proactive-fallback', chunks: 1 } : fallback;
+}
+
 /**
  * Send a message to target, using reply mode if possible, falling back to proactive.
  * Returns Promise<{ok, error}>.
  */
-function sendMessage(target, msgId, text) {
-  // Try reply mode first (using tracked reqId)
-  if (msgId) {
-    const req = getRequest(msgId);
-    if (req) {
-      console.log(`[wecom] ${t(runtimeLocale(), 'runtime_reply_via_req', {
-        reqId: `${req.reqId.substring(0, 8)}...`,
-        target
-      })}`);
-      return sendReply(req.reqId, text);
-    }
+async function sendMessage(target, msgId, text) {
+  const content = String(text || '').trim();
+  if (!content) return { ok: true, mode: 'noop', chunks: 0 };
+
+  const req = msgId ? getRequest(msgId) : null;
+  if (req && utf8ByteLength(content) <= STREAM_MAX_BYTES) {
+    console.log(`[wecom] Replying via stream reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+    const streamResult = await sendStreamReply(target, req, content);
+    if (streamResult.ok) return streamResult;
+    console.log(`[wecom] Stream reply failed, falling back to markdown chunks: ${streamResult.error || 'unknown error'}`);
   }
 
-  // Fallback: proactive send
-  const entry = activatedTargets.get(target);
-  const chatId = entry?.chatId || target;
-  console.log(`[wecom] ${t(runtimeLocale(), 'runtime_send_proactive', { chatId })}`);
-  return sendProactive(chatId, text);
+  const chunks = splitMessage(content, MARKDOWN_MAX_BYTES);
+  if (req) {
+    console.log(`[wecom] Replying via markdown reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+    return sendReplyThenProactive(target, req, chunks);
+  }
+
+  console.log(`[wecom] Sending proactive to chatId: ${resolveChatTarget(target)}`);
+  return sendProactiveChunks(target, chunks);
+}
+
+async function skipMessage(target, msgId) {
+  if (msgId) {
+    const result = await finishPendingReplyPlaceholder(msgId);
+    if (result.ok) return result;
+  }
+  return { ok: true, mode: 'skip' };
 }
 
 // ============================================================
@@ -591,16 +887,40 @@ async function processCallback(frame) {
       }
     }
 
-    // Extract message content
-    let textContent = '';
+    if (reqId && msgId) {
+      sendInitialReplyPlaceholder(msgId).catch((err) => {
+        console.error(`[wecom] Failed to send thinking placeholder ${msgId}: ${err.message}`);
+      });
+    }
 
-    switch (msgType) {
-      case 'text':
-        textContent = body?.text?.content || '';
-        break;
-      case 'image':
-        textContent = `[image, url: ${body?.image?.url || 'N/A'}]`;
-        break;
+  // Extract message content
+  let textContent = '';
+  let filePath = '';
+
+  switch (msgType) {
+    case 'text':
+      textContent = body?.text?.content || '';
+      break;
+    case 'image':
+      try {
+        const imageDownload = await downloadIncomingMedia(
+          body?.image?.url,
+          body?.image?.aeskey,
+          body?.image?.filename,
+          'wecom-image',
+          msgId
+        );
+        if (imageDownload) {
+          filePath = imageDownload.path;
+          textContent = `[image: ${imageDownload.filename}]`;
+        } else {
+          textContent = `[image]`;
+        }
+      } catch (err) {
+        console.error(`[wecom] Failed to download image ${msgId}: ${err.message}`);
+        textContent = `[image]`;
+      }
+      break;
       case 'voice':
         textContent = body?.voice?.transcription || `[voice message]`;
         break;
@@ -608,7 +928,24 @@ async function processCallback(frame) {
         textContent = `[video message]`;
         break;
       case 'file':
-        textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+        try {
+          const fileDownload = await downloadIncomingMedia(
+            body?.file?.url,
+            body?.file?.aeskey,
+            body?.file?.filename,
+            'wecom-file',
+            msgId
+          );
+          if (fileDownload) {
+            filePath = fileDownload.path;
+            textContent = `[file: ${fileDownload.filename}]`;
+          } else {
+            textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+          }
+        } catch (err) {
+          console.error(`[wecom] Failed to download file ${msgId}: ${err.message}`);
+          textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+        }
         break;
       case 'mixed': {
         // Mixed message: text + images
@@ -659,6 +996,10 @@ async function processCallback(frame) {
         formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
       }
 
+      if (filePath) {
+        formattedMessage += ` ---- file: ${filePath}`;
+      }
+
       const endpoint = `${chatId}|type:group|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     } else {
@@ -668,6 +1009,10 @@ async function processCallback(frame) {
       if (context.length > 0) {
         const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
         formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
+      }
+
+      if (filePath) {
+        formattedMessage += ` ---- file: ${filePath}`;
       }
 
       const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
@@ -919,14 +1264,14 @@ function startInternalServer() {
 
 async function handleInternalRequest(url, data, res) {
   if (url === '/internal/send') {
-    const { target, msgId, content } = data;
-    if (!target || !content) {
+    const { target, msgId, content, skip } = data;
+    if (!target || (!skip && !content)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Missing target or content' }));
       return;
     }
 
-    const result = await sendMessage(target, msgId, content);
+    const result = skip ? await skipMessage(target, msgId) : await sendMessage(target, msgId, content);
     res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
 
