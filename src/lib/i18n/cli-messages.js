@@ -152,7 +152,15 @@ const MESSAGES = {
     runtime_internal_server_closed: '内部服务已关闭',
     runtime_force_exit: '超时后强制退出',
     runtime_welcome_locale: '欢迎语按 locale 输出',
-    runtime_welcome_fallback: '欢迎语使用 legacy welcome_text 回退'
+    runtime_welcome_fallback: '欢迎语使用 legacy welcome_text 回退',
+    config_file_missing: '配置文件不存在: {path}',
+    config_load_failed: '加载配置失败: {message}',
+    config_save_failed: '保存配置失败: {message}',
+    config_watch_missing: 'fs.watch 事件后配置文件缺失，跳过重载',
+    config_watch_reloading: '配置文件已变化，正在重载...',
+    config_watch_error: '配置 watcher 错误: {message}',
+    runtime_uncaught_exception: '未捕获异常: {message}',
+    runtime_unhandled_rejection: '未处理的 Promise 拒绝: {reason}'
   },
   'en-US': {
     admin_save_failed: 'Failed to save config',
@@ -244,7 +252,15 @@ const MESSAGES = {
     runtime_internal_server_closed: 'Internal server closed',
     runtime_force_exit: 'Force exit after timeout',
     runtime_welcome_locale: 'Welcome message sent via locale-aware mapping',
-    runtime_welcome_fallback: 'Welcome message fell back to legacy welcome_text'
+    runtime_welcome_fallback: 'Welcome message fell back to legacy welcome_text',
+    config_file_missing: 'Config file not found: {path}',
+    config_load_failed: 'Failed to load config: {message}',
+    config_save_failed: 'Failed to save config: {message}',
+    config_watch_missing: 'Config file missing after fs.watch event, skipping reload',
+    config_watch_reloading: 'Config file changed, reloading...',
+    config_watch_error: 'Config watcher error: {message}',
+    runtime_uncaught_exception: 'Uncaught exception: {message}',
+    runtime_unhandled_rejection: 'Unhandled rejection: {reason}'
   }
 };
 

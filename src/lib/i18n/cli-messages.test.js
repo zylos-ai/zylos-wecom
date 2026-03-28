@@ -30,4 +30,8 @@ test('t interpolates localized values', () => {
     t('zh-CN', 'runtime_reconnecting', { seconds: 5 }),
     '5 秒后重连...'
   );
+  assert.equal(
+    t('en-US', 'config_watch_reloading'),
+    'Config file changed, reloading...'
+  );
 });

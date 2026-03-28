@@ -7,6 +7,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import { t } from './i18n/cli-messages.js';
+import { resolveRuntimeLocale } from './i18n/runtime.js';
 
 const HOME = process.env.HOME;
 export const DATA_DIR = path.join(HOME, 'zylos/components/wecom');
@@ -58,6 +60,10 @@ let config = null;
 let configWatcher = null;
 let configReloadTimer = null;
 
+function configLocale(candidateConfig = config) {
+  return resolveRuntimeLocale(candidateConfig);
+}
+
 /**
  * Load configuration from file
  */
@@ -73,11 +79,11 @@ export function loadConfig() {
       config.doc = { ...DEFAULT_CONFIG.doc, ...parsed.doc };
       config.ws = { ...DEFAULT_CONFIG.ws, ...parsed.ws };
     } else {
-      console.warn(`[wecom] Config file not found: ${CONFIG_PATH}`);
+      console.warn(`[wecom] ${t(configLocale(DEFAULT_CONFIG), 'config_file_missing', { path: CONFIG_PATH })}`);
       config = { ...DEFAULT_CONFIG };
     }
   } catch (err) {
-    console.error(`[wecom] Failed to load config: ${err.message}`);
+    console.error(`[wecom] ${t(configLocale(DEFAULT_CONFIG), 'config_load_failed', { message: err.message })}`);
     config = { ...DEFAULT_CONFIG };
   }
   return config;
@@ -104,7 +110,7 @@ export function saveConfig(newConfig) {
     config = newConfig;
     return true;
   } catch (err) {
-    console.error(`[wecom] Failed to save config: ${err.message}`);
+    console.error(`[wecom] ${t(configLocale(newConfig || DEFAULT_CONFIG), 'config_save_failed', { message: err.message })}`);
     try {
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
     } catch {}
@@ -132,10 +138,10 @@ export function watchConfig(onChange) {
     configReloadTimer = setTimeout(() => {
       configReloadTimer = null;
       if (!fs.existsSync(CONFIG_PATH)) {
-        console.warn('[wecom] Config file missing after fs.watch event, skipping reload');
+        console.warn(`[wecom] ${t(configLocale(), 'config_watch_missing')}`);
         return;
       }
-      console.log('[wecom] Config file changed, reloading...');
+      console.log(`[wecom] ${t(configLocale(), 'config_watch_reloading')}`);
       loadConfig();
       if (onChange) {
         onChange(config);
@@ -150,7 +156,7 @@ export function watchConfig(onChange) {
       }
     });
     configWatcher.on('error', (err) => {
-      console.warn(`[wecom] Config watcher error: ${err.message}`);
+      console.warn(`[wecom] ${t(configLocale(), 'config_watch_error', { message: err.message })}`);
       if (configReloadTimer) {
         clearTimeout(configReloadTimer);
         configReloadTimer = null;

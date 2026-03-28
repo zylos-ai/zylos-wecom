@@ -24,7 +24,7 @@ dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
 import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
 import { t } from './lib/i18n/cli-messages.js';
-import { resolveLocale } from './lib/i18n/locale.js';
+import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -40,33 +40,11 @@ let authenticated = false;
 let subscribeReqId = null; // Track subscribe req_id for auth response matching
 
 function runtimeLocale() {
-  return resolveLocale({
-    configLocale: config?.message?.locale,
-    envLocale: process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG
-  });
+  return resolveRuntimeLocale(config);
 }
 
 function localizedRuntimeMessage(key, params = {}) {
   return t(runtimeLocale(), key, params);
-}
-
-function resolveWelcomeText() {
-  const locale = runtimeLocale();
-  const welcomeTexts = config.message?.welcome_texts;
-  const localized = welcomeTexts && typeof welcomeTexts === 'object'
-    ? welcomeTexts[locale]
-    : '';
-
-  if (typeof localized === 'string' && localized.trim()) {
-    return { text: localized, source: 'localized' };
-  }
-
-  const legacy = config.message?.welcome_text;
-  if (typeof legacy === 'string' && legacy.trim()) {
-    return { text: legacy, source: 'legacy' };
-  }
-
-  return { text: '', source: 'none' };
 }
 
 // Initialize
@@ -710,7 +688,7 @@ async function processCallback(frame) {
     if (eventType === 'enter_chat') {
       const reqId = headers?.req_id;
       if (reqId) {
-        const welcome = resolveWelcomeText();
+        const welcome = resolveWelcomeMessage(config);
         const welcomeText = welcome.text;
         if (welcomeText) {
           // Auto-reply with configured welcome message
@@ -1033,10 +1011,11 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 process.on('uncaughtException', (err) => {
-  console.error(`[wecom] Uncaught exception: ${err.message}`);
+  console.error(`[wecom] ${localizedRuntimeMessage('runtime_uncaught_exception', { message: err.message })}`);
   console.error(err.stack);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error(`[wecom] Unhandled rejection:`, reason);
+  const reasonText = reason instanceof Error ? reason.message : String(reason);
+  console.error(`[wecom] ${localizedRuntimeMessage('runtime_unhandled_rejection', { reason: reasonText })}`);
 });
