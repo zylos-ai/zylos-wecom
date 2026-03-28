@@ -46,6 +46,29 @@ function runtimeLocale() {
   });
 }
 
+function localizedRuntimeMessage(key, params = {}) {
+  return t(runtimeLocale(), key, params);
+}
+
+function resolveWelcomeText() {
+  const locale = runtimeLocale();
+  const welcomeTexts = config.message?.welcome_texts;
+  const localized = welcomeTexts && typeof welcomeTexts === 'object'
+    ? welcomeTexts[locale]
+    : '';
+
+  if (typeof localized === 'string' && localized.trim()) {
+    return { text: localized, source: 'localized' };
+  }
+
+  const legacy = config.message?.welcome_text;
+  if (typeof legacy === 'string' && legacy.trim()) {
+    return { text: legacy, source: 'legacy' };
+  }
+
+  return { text: '', source: 'none' };
+}
+
 // Initialize
 let config = getConfig();
 const INTERNAL_SECRET = crypto.randomUUID();
@@ -58,8 +81,8 @@ try {
 } catch (err) {
   console.error(`[wecom] Failed to write internal token file: ${err.message}`);
 }
-console.log(`[wecom] Starting (WebSocket mode)...`);
-console.log(`[wecom] Data directory: ${DATA_DIR}`);
+console.log(`[wecom] ${localizedRuntimeMessage('runtime_starting')}`);
+console.log(`[wecom] ${localizedRuntimeMessage('runtime_data_dir', { dir: DATA_DIR })}`);
 
 // Ensure directories
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
@@ -71,23 +94,23 @@ fs.mkdirSync(MEDIA_DIR, { recursive: true });
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
 
 if (!config.enabled) {
-  console.log(`[wecom] Component disabled in config, exiting.`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_disabled_exit')}`);
   process.exit(0);
 }
 
 // Verify required credentials
 const creds = getCredentials();
 if (!creds.bot_id || !creds.secret) {
-  console.error(`[wecom] ERROR: WECOM_BOT_ID and WECOM_BOT_SECRET must be set in ~/zylos/.env`);
+  console.error(`[wecom] ${localizedRuntimeMessage('runtime_missing_creds')}`);
   process.exit(1);
 }
 
 // Watch for config changes
 watchConfig((newConfig) => {
-  console.log(`[wecom] Config reloaded`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_config_reloaded')}`);
   config = newConfig;
   if (!newConfig.enabled) {
-    console.log(`[wecom] Component disabled, stopping...`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_disabled_stopping')}`);
     shutdown();
   }
 });
@@ -101,7 +124,7 @@ const processedMessages = new Map();
 function isDuplicate(msgId) {
   if (!msgId) return false;
   if (processedMessages.has(msgId)) {
-    console.log(`[wecom] Duplicate MsgId ${msgId}, skipping`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_duplicate_msg', { msgId })}`);
     return true;
   }
   processedMessages.set(msgId, Date.now());
@@ -417,14 +440,14 @@ function buildCommand(cmd, body, reqId = crypto.randomUUID()) {
  */
 function wsSendRaw(data) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error('[wecom] WebSocket not connected, cannot send');
+    console.error(`[wecom] ${localizedRuntimeMessage('runtime_ws_not_connected')}`);
     return false;
   }
   try {
     ws.send(data);
     return true;
   } catch (err) {
-    console.error(`[wecom] WebSocket send error: ${err.message}`);
+    console.error(`[wecom] ${localizedRuntimeMessage('runtime_ws_send_error', { message: err.message })}`);
     return false;
   }
 }
@@ -673,7 +696,11 @@ async function processCallback(frame) {
       forwardToC4(formattedMessage, endpoint);
     }
 
-    console.log(`[wecom] ${isGroup ? 'Group' : 'DM'} from ${senderName}: ${textContent.slice(0, 100)}`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_message_summary', {
+      kind: localizedRuntimeMessage(isGroup ? 'runtime_kind_group' : 'runtime_kind_dm'),
+      senderName,
+      content: textContent.slice(0, 100)
+    })}`);
 
   } else if (cmd === 'aibot_event_callback') {
     const eventType = body?.event?.eventtype || body?.msgtype;
@@ -683,7 +710,8 @@ async function processCallback(frame) {
     if (eventType === 'enter_chat') {
       const reqId = headers?.req_id;
       if (reqId) {
-        const welcomeText = config.message?.welcome_text;
+        const welcome = resolveWelcomeText();
+        const welcomeText = welcome.text;
         if (welcomeText) {
           // Auto-reply with configured welcome message
           wsSendRaw(JSON.stringify({
@@ -691,6 +719,9 @@ async function processCallback(frame) {
             headers: { req_id: reqId },
             body: { msgtype: 'text', text: { content: welcomeText } }
           }));
+          console.log(`[wecom] ${localizedRuntimeMessage(
+            welcome.source === 'localized' ? 'runtime_welcome_locale' : 'runtime_welcome_fallback'
+          )}`);
         }
         // If welcome_text is empty, the event is silently ignored
         // (Claude handles greetings via normal message flow)
@@ -723,12 +754,12 @@ function connect() {
   if (isShuttingDown) return;
 
   const wsUrl = config.ws?.url || 'wss://openws.work.weixin.qq.com';
-  console.log(`[wecom] Connecting to ${wsUrl}...`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_connecting', { url: wsUrl })}`);
 
   ws = new WebSocket(wsUrl);
 
   ws.on('open', () => {
-    console.log('[wecom] WebSocket connected, authenticating...');
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_ws_authenticating')}`);
     wsSendRaw(buildSubscribe());
   });
 
@@ -772,7 +803,7 @@ function connect() {
       // Handle message/event callbacks
       if (cmd === 'aibot_msg_callback' || cmd === 'aibot_event_callback') {
         processCallback(frame).catch(err => {
-          console.error(`[wecom] Callback processing error: ${err.message}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_callback_error', { message: err.message })}`);
         });
         return;
       }
@@ -781,7 +812,10 @@ function connect() {
       if (cmd === 'aibot_respond_msg' || cmd === 'aibot_send_msg') {
         const ok = !frame.body?.code || frame.body.code === 0;
         if (!ok) {
-          console.error(`[wecom] Send error (${cmd}): ${JSON.stringify(frame.body)}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_body', {
+            cmd,
+            body: JSON.stringify(frame.body)
+          })}`);
         }
         if (frameReqId) resolvePendingSend(frameReqId, ok, ok ? null : frame.body?.msg);
         return;
@@ -794,7 +828,9 @@ function connect() {
         }
         const ok = frame.errcode === 0;
         if (!ok) {
-          console.error(`[wecom] Send error: ${JSON.stringify(frame)}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_frame', {
+            frame: JSON.stringify(frame)
+          })}`);
         }
         resolvePendingSend(frameReqId, ok, ok ? null : frame.errmsg);
         return;
@@ -806,9 +842,11 @@ function connect() {
       }
 
       // Log unknown frames with full content for debugging
-      console.log(`[wecom] Unknown frame: ${JSON.stringify(frame).substring(0, 500)}`);
+      console.log(`[wecom] ${localizedRuntimeMessage('runtime_unknown_frame', {
+        frame: JSON.stringify(frame).substring(0, 500)
+      })}`);
     } catch (err) {
-      console.error(`[wecom] Failed to parse message: ${err.message}`);
+      console.error(`[wecom] ${localizedRuntimeMessage('runtime_parse_failed', { message: err.message })}`);
     }
   });
 
@@ -828,14 +866,14 @@ function connect() {
     }
     pendingRequestsByReqId.clear();
     const reasonStr = reason?.toString() || 'unknown';
-    console.log(`[wecom] WebSocket closed: ${code} ${reasonStr}`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_ws_closed', { code, reason: reasonStr })}`);
     scheduleReconnect();
   });
 
   ws.on('error', (err) => {
     // Suppress expected close errors
     if (err.message?.includes('WebSocket was closed') || isShuttingDown) return;
-    console.error(`[wecom] WebSocket error: ${err.message}`);
+    console.error(`[wecom] ${localizedRuntimeMessage('runtime_ws_error', { message: err.message })}`);
   });
 }
 
@@ -850,7 +888,9 @@ function scheduleReconnect() {
   const jitter = delay * (0.75 + Math.random() * 0.5);
   const actualDelay = Math.round(jitter);
 
-  console.log(`[wecom] Reconnecting in ${Math.round(actualDelay / 1000)}s...`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_reconnecting', {
+    seconds: Math.round(actualDelay / 1000)
+  })}`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
@@ -886,14 +926,16 @@ function startInternalServer() {
           res.end(JSON.stringify({ error }));
         }
         if (!(err instanceof SyntaxError)) {
-          console.error(`[wecom] Internal request handling failed: ${err.message}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_internal_request_failed', {
+            message: err.message
+          })}`);
         }
       }
     });
   });
 
   internalServer.listen(port, '127.0.0.1', () => {
-    console.log(`[wecom] Internal API on 127.0.0.1:${port}`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_internal_api', { port })}`);
   });
 }
 
@@ -941,7 +983,7 @@ async function handleInternalRequest(url, data, res) {
 startInternalServer();
 connect();
 
-console.log(`[wecom] Bot ID: ${creds.bot_id.substring(0, 8)}...`);
+console.log(`[wecom] ${localizedRuntimeMessage('runtime_bot_id', { botId: `${creds.bot_id.substring(0, 8)}...` })}`);
 
 // ============================================================
 // Graceful shutdown
@@ -949,7 +991,7 @@ console.log(`[wecom] Bot ID: ${creds.bot_id.substring(0, 8)}...`);
 async function shutdown() {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  console.log('[wecom] Shutting down...');
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_shutting_down')}`);
 
   // Stop config watcher
   stopWatching();
@@ -976,13 +1018,13 @@ async function shutdown() {
   // Close internal server
   if (internalServer) {
     internalServer.close(() => {
-      console.log('[wecom] Internal server closed');
+      console.log(`[wecom] ${localizedRuntimeMessage('runtime_internal_server_closed')}`);
     });
   }
 
   // Force exit after timeout
   setTimeout(() => {
-    console.log('[wecom] Force exit after timeout');
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_force_exit')}`);
     process.exit(0);
   }, 5000);
 }

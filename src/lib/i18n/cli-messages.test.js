@@ -26,4 +26,8 @@ test('t interpolates localized values', () => {
     t('en-US', 'runtime_group_blocked', { senderName: 'Alice', chatId: 'g1' }),
     'Group message from Alice in g1 blocked by policy'
   );
+  assert.equal(
+    t('zh-CN', 'runtime_reconnecting', { seconds: 5 }),
+    '5 秒后重连...'
+  );
 });

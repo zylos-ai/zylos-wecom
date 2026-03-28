@@ -93,7 +93,15 @@ Send a message to your WeCom bot. The first private message sender becomes the o
   "dmAllowFrom": [],
   "groupPolicy": "allowlist",
   "groups": {},
-  "message": { "context_messages": 10, "welcome_text": "" },
+  "message": {
+    "context_messages": 10,
+    "locale": "zh-CN",
+    "welcome_text": "",
+    "welcome_texts": {
+      "zh-CN": "你好，我是 Zylos。",
+      "en-US": "Hello, I'm Zylos."
+    }
+  },
   "doc": { "fetch_timeout_ms": 5000, "persist_openclaw_compat": true },
   "ws": {
     "url": "wss://openws.work.weixin.qq.com",
@@ -143,6 +151,9 @@ node src/admin.js help --locale en-US
 node scripts/setup-wecom-doc-mcp.js --locale en-US
 node scripts/send.js --locale en-US "<endpoint_id>" "message"
 ```
+
+Runtime status logs and welcome-message selection follow the same locale chain.
+For welcome messages, `message.welcome_texts[locale]` is preferred and `message.welcome_text` is kept as a legacy fallback.
 
 For manual local bootstrap into `mcporter`, this repo now includes:
 
