@@ -38,6 +38,11 @@ export const DEFAULT_CONFIG = {
     context_messages: 10,
     welcome_text: ''  // empty = no auto-reply; non-empty = auto-reply
   },
+  // Doc MCP bootstrap settings
+  doc: {
+    fetch_timeout_ms: 5000,
+    persist_openclaw_compat: true
+  },
   // WebSocket settings
   ws: {
     url: 'wss://openws.work.weixin.qq.com',
@@ -63,6 +68,7 @@ export function loadConfig() {
       // Ensure nested objects are merged
       config.owner = { ...DEFAULT_CONFIG.owner, ...parsed.owner };
       config.message = { ...DEFAULT_CONFIG.message, ...parsed.message };
+      config.doc = { ...DEFAULT_CONFIG.doc, ...parsed.doc };
       config.ws = { ...DEFAULT_CONFIG.ws, ...parsed.ws };
     } else {
       console.warn(`[wecom] Config file not found: ${CONFIG_PATH}`);

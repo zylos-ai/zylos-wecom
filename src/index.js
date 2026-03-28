@@ -22,6 +22,7 @@ import WebSocket from 'ws';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
+import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -151,6 +152,7 @@ const reqCleanupInterval = setInterval(() => {
 // ============================================================
 const SEND_TIMEOUT = 10000; // 10 seconds
 const pendingSends = new Map(); // reqId -> { resolve, timer }
+const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -159,6 +161,15 @@ function resolvePendingSend(reqId, ok, errorMsg) {
     pendingSends.delete(reqId);
     pending.resolve({ ok, error: errorMsg || null });
   }
+}
+
+function resolvePendingRequest(reqId, payload) {
+  const pending = pendingRequestsByReqId.get(reqId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingRequestsByReqId.delete(reqId);
+  pending.resolve(payload);
+  return true;
 }
 
 // ============================================================
@@ -377,6 +388,17 @@ function buildSendMsg(chatId, msgtype, body) {
   });
 }
 
+function buildCommand(cmd, body, reqId = crypto.randomUUID()) {
+  return {
+    reqId,
+    data: JSON.stringify({
+      cmd,
+      headers: { req_id: reqId },
+      body
+    })
+  };
+}
+
 // ============================================================
 // WebSocket message sending
 // ============================================================
@@ -420,6 +442,32 @@ function wsSend(data, reqId) {
       clearTimeout(timer);
       pendingSends.delete(reqId);
       resolve({ ok: false, error: err.message });
+    }
+  });
+}
+
+function wsRequest(cmd, body, options = {}) {
+  const timeoutMs = options.timeoutMs || config.doc?.fetch_timeout_ms || 5000;
+  const { reqId, data } = buildCommand(cmd, body);
+
+  if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) {
+    return Promise.reject(new Error('WebSocket not ready'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequestsByReqId.delete(reqId);
+      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    pendingRequestsByReqId.set(reqId, { resolve, timer });
+
+    try {
+      ws.send(data);
+    } catch (err) {
+      clearTimeout(timer);
+      pendingRequestsByReqId.delete(reqId);
+      reject(err);
     }
   });
 }
@@ -683,6 +731,14 @@ function connect() {
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
           console.log('[wecom] Authenticated successfully');
           startHeartbeat();
+          void fetchAndSaveWecomDocMcpConfig({
+            accountId: 'default',
+            request: (requestCmd, requestBody, options = {}) => wsRequest(requestCmd, requestBody, options),
+            timeoutMs: config.doc?.fetch_timeout_ms || 5000,
+            persistOpenClawCompat: config.doc?.persist_openclaw_compat !== false,
+            log: (message) => console.log(message),
+            error: (message) => console.error(message)
+          });
         } else {
           console.error(`[wecom] Authentication failed: ${JSON.stringify(frame)}`);
           subscribeReqId = null;
@@ -716,11 +772,19 @@ function connect() {
 
       // Handle generic responses without cmd (e.g., error frames)
       if (!cmd && frame.errcode !== undefined && frameReqId) {
+        if (resolvePendingRequest(frameReqId, frame)) {
+          return;
+        }
         const ok = frame.errcode === 0;
         if (!ok) {
           console.error(`[wecom] Send error: ${JSON.stringify(frame)}`);
         }
         resolvePendingSend(frameReqId, ok, ok ? null : frame.errmsg);
+        return;
+      }
+
+      // Handle request/response style commands such as aibot_get_mcp_config.
+      if (frameReqId && resolvePendingRequest(frameReqId, frame)) {
         return;
       }
 
@@ -741,6 +805,11 @@ function connect() {
       pending.resolve({ ok: false, error: 'WebSocket closed' });
     }
     pendingSends.clear();
+    for (const [reqId, pending] of pendingRequestsByReqId) {
+      clearTimeout(pending.timer);
+      pending.resolve({ errcode: -1, errmsg: 'WebSocket closed' });
+    }
+    pendingRequestsByReqId.clear();
     const reasonStr = reason?.toString() || 'unknown';
     console.log(`[wecom] WebSocket closed: ${code} ${reasonStr}`);
     scheduleReconnect();

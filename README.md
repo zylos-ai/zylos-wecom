@@ -27,6 +27,7 @@
 - **C4 Bridge** -- Standard Zylos communication bridge integration
 - **Admin CLI** -- Configuration management without manual JSON editing
 - **Hot Reload** -- Config changes take effect without restart (most settings)
+- **Doc MCP Bootstrap** -- Best-effort fetch and persistence of WeCom doc MCP config after WS auth
 
 ## Prerequisites
 
@@ -93,6 +94,7 @@ Send a message to your WeCom bot. The first private message sender becomes the o
   "groupPolicy": "allowlist",
   "groups": {},
   "message": { "context_messages": 10, "welcome_text": "" },
+  "doc": { "fetch_timeout_ms": 5000, "persist_openclaw_compat": true },
   "ws": {
     "url": "wss://openws.work.weixin.qq.com",
     "heartbeat_interval": 30000,
@@ -113,6 +115,23 @@ $ADM set-dm-policy owner     # Set DM policy
 $ADM list-dm-allow           # List DM allowlist
 $ADM add-dm-allow <user_id>  # Add user to allowlist
 $ADM help                    # Show all commands
+```
+
+## Document MCP Bootstrap
+
+After WebSocket authentication succeeds, `zylos-wecom` best-effort requests the WeCom doc MCP config via `aibot_get_mcp_config` with `biz_type: "doc"`.
+
+Persisted paths:
+
+- Primary: `~/zylos/components/wecom/wecom-mcp-config.json`
+- Compatibility mirror: `~/.openclaw/wecomConfig/config.json`
+
+This only bootstraps config. Later document operations should be handled by a separate `wecom-doc` skill/flow through `mcporter`.
+
+For manual local bootstrap into `mcporter`, this repo now includes:
+
+```bash
+node scripts/setup-wecom-doc-mcp.js
 ```
 
 ## Access Control
