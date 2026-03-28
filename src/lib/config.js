@@ -36,6 +36,7 @@ export const DEFAULT_CONFIG = {
   // Message settings
   message: {
     context_messages: 10,
+    locale: 'zh-CN',
     welcome_text: ''  // empty = no auto-reply; non-empty = auto-reply
   },
   // Doc MCP bootstrap settings

@@ -128,6 +128,14 @@ Persisted paths:
 
 This only bootstraps config. Later document operations should be handled by a separate `wecom-doc` skill/flow through `mcporter`.
 
+The helper guide script supports localized output:
+
+```bash
+node scripts/print-wecom-doc-auth-guide.js --locale en-US
+```
+
+Locale priority is `--locale` -> `config.message.locale` -> `LANG/LC_*` -> `zh-CN`.
+
 For manual local bootstrap into `mcporter`, this repo now includes:
 
 ```bash
