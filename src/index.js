@@ -135,7 +135,7 @@ function trackRequest(msgId, reqId, chatId, userId, chatType) {
     userId,
     chatType,
     receivedAt: Date.now(),
-    streamId: `stream_${crypto.randomUUID()}`,
+    streamId: crypto.randomBytes(16).toString('hex'),
     placeholderSent: false,
     placeholderSentAt: 0,
   });
@@ -175,7 +175,7 @@ const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
 const MARKDOWN_MAX_BYTES = 2000;
 const STREAM_MAX_BYTES = 20480;
 const STREAM_PLACEHOLDER = '<think></think>';
-const STREAM_PLACEHOLDER_MIN_MS = 0;
+const STREAM_PLACEHOLDER_MIN_MS = 3000;
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -559,16 +559,13 @@ function buildRespondMsg(reqId, msgtype, body) {
   });
 }
 
-function buildRespondStream(reqId, streamId, content, finish = false, feedback) {
+function buildRespondStream(reqId, streamId, content, finish = false) {
   const stream = {
     id: streamId,
     finish,
   };
   if (String(content || '').trim()) {
     stream.content = content;
-  }
-  if (feedback) {
-    stream.feedback = feedback;
   }
 
   return JSON.stringify({
@@ -682,8 +679,8 @@ function sendReply(reqId, text) {
   return wsSend(data, reqId);
 }
 
-function sendReplyStream(reqId, streamId, text, finish = false, feedback) {
-  const data = buildRespondStream(reqId, streamId, text, finish, feedback);
+function sendReplyStream(reqId, streamId, text, finish = false) {
+  const data = buildRespondStream(reqId, streamId, text, finish);
   return wsSend(data, reqId);
 }
 
@@ -694,7 +691,7 @@ async function sendInitialReplyPlaceholder(msgId) {
   }
 
   const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
-  const result = await sendReplyStream(req.reqId, req.streamId, placeholder, false, { id: req.streamId });
+  const result = await sendReplyStream(req.reqId, req.streamId, placeholder, false);
   if (result.ok) {
     req.placeholderSent = true;
     req.placeholderSentAt = Date.now();
@@ -759,11 +756,11 @@ async function sendReplyThenProactive(target, req, chunks) {
 }
 
 async function sendStreamReply(target, req, text) {
-  const streamId = req.streamId || `stream_${crypto.randomUUID()}`;
+  const streamId = req.streamId || crypto.randomBytes(16).toString('hex');
   req.streamId = streamId;
   const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
   if (!req.placeholderSent) {
-    const started = await sendReplyStream(req.reqId, streamId, placeholder, false, { id: streamId });
+    const started = await sendReplyStream(req.reqId, streamId, placeholder, false);
     if (!started.ok) {
       return started;
     }
@@ -771,7 +768,7 @@ async function sendStreamReply(target, req, text) {
     req.placeholderSentAt = Date.now();
   }
 
-  const placeholderMinMs = Number(config.message?.stream_placeholder_min_ms || STREAM_PLACEHOLDER_MIN_MS);
+  const placeholderMinMs = Number(config.message?.stream_placeholder_min_ms ?? STREAM_PLACEHOLDER_MIN_MS);
   const elapsedMs = req.placeholderSentAt ? (Date.now() - req.placeholderSentAt) : placeholderMinMs;
   if (placeholderMinMs > elapsedMs) {
     await sleep(placeholderMinMs - elapsedMs);
