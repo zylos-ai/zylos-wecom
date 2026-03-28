@@ -23,13 +23,22 @@ import path from 'path';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, DATA_DIR } from '../src/lib/config.js';
+import { t } from '../src/lib/i18n/cli-messages.js';
+import { parseLocaleArg, resolveLocale, stripLocaleArg } from '../src/lib/i18n/locale.js';
 
 const MAX_LENGTH = 2000; // WeCom text message max length
 
 // Parse arguments
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const config = getConfig();
+const locale = resolveLocale({
+  cliLocale: parseLocaleArg(rawArgs),
+  configLocale: config?.message?.locale,
+  envLocale: process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG
+});
+const args = stripLocaleArg(rawArgs);
 if (args.length < 2) {
-  console.error('Usage: send.js <endpoint_id> <message>');
+  console.error(t(locale, 'send_usage'));
   process.exit(1);
 }
 
@@ -65,9 +74,8 @@ if (message.trim() === '[SKIP]') {
 }
 
 // Check if component is enabled
-const config = getConfig();
 if (!config.enabled) {
-  console.error('Error: wecom is disabled in config');
+  console.error(t(locale, 'send_disabled'));
   process.exit(1);
 }
 
@@ -235,7 +243,7 @@ async function sendText(target, msgId, text) {
   }
 
   if (chunks.length > 1) {
-    console.log(`Sent ${chunks.length} chunks`);
+    console.log(t(locale, 'send_sent_chunks', { count: chunks.length }));
   }
 }
 
@@ -243,10 +251,10 @@ async function send() {
   try {
     await sendText(targetUser, msgId, message);
     await recordOutgoing(message);
-    console.log('Message sent successfully');
+    console.log(t(locale, 'send_success'));
     process.exit(0);
   } catch (err) {
-    console.error(`Error: ${err.message}`);
+    console.error(t(locale, 'send_error', { message: err.message }));
     process.exit(1);
   }
 }

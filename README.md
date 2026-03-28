@@ -136,6 +136,14 @@ node scripts/print-wecom-doc-auth-guide.js --locale en-US
 
 Locale priority is `--locale` -> `config.message.locale` -> `LANG/LC_*` -> `zh-CN`.
 
+The same locale resolution is now used by the admin CLI and helper scripts such as:
+
+```bash
+node src/admin.js help --locale en-US
+node scripts/setup-wecom-doc-mcp.js --locale en-US
+node scripts/send.js --locale en-US "<endpoint_id>" "message"
+```
+
 For manual local bootstrap into `mcporter`, this repo now includes:
 
 ```bash

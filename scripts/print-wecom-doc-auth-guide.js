@@ -9,6 +9,7 @@ import {
   renderDocAuthGuide,
   resolveDocAuthGuideLocale
 } from '../src/lib/i18n/doc-auth-guide.js';
+import { parseLocaleArg } from '../src/lib/i18n/locale.js';
 
 const ZYLOS_CONFIG_PATH = path.join(os.homedir(), 'zylos', 'components', 'wecom', 'wecom-mcp-config.json');
 const OPENCLAW_CONFIG_PATH = path.join(os.homedir(), '.openclaw', 'wecomConfig', 'config.json');
@@ -42,19 +43,6 @@ function resolveDocConfig() {
   if (fallback) return { ...fallback, source: OPENCLAW_CONFIG_PATH };
 
   return null;
-}
-
-function parseLocaleArg(argv) {
-  for (let index = 0; index < argv.length; index += 1) {
-    const value = argv[index];
-    if (value === '--locale') {
-      return argv[index + 1] || '';
-    }
-    if (value.startsWith('--locale=')) {
-      return value.slice('--locale='.length);
-    }
-  }
-  return '';
 }
 
 const docConfig = resolveDocConfig();

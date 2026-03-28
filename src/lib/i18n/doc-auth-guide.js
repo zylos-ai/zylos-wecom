@@ -1,36 +1,7 @@
-const DEFAULT_LOCALE = 'zh-CN';
-
-const LOCALE_ALIASES = new Map([
-  ['zh', 'zh-CN'],
-  ['zh-cn', 'zh-CN'],
-  ['zh-hans', 'zh-CN'],
-  ['zh-hans-cn', 'zh-CN'],
-  ['en', 'en-US'],
-  ['en-us', 'en-US']
-]);
-
-function normalizeLocale(input) {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  const canonical = trimmed
-    .split('.')[0]
-    .replace(/_/g, '-')
-    .toLowerCase();
-
-  const alias = LOCALE_ALIASES.get(canonical);
-  if (alias) return alias;
-
-  return null;
-}
+import { resolveLocale } from './locale.js';
 
 export function resolveDocAuthGuideLocale({ cliLocale, configLocale, envLocale } = {}) {
-  return (
-    normalizeLocale(cliLocale)
-    || normalizeLocale(configLocale)
-    || normalizeLocale(envLocale)
-    || DEFAULT_LOCALE
-  );
+  return resolveLocale({ cliLocale, configLocale, envLocale });
 }
 
 function renderMissingConfigGuide(locale, { checkedPaths }) {
