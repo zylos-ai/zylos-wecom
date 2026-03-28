@@ -211,7 +211,7 @@ export async function fetchAndSaveWecomDocMcpConfig({
       log(`[wecom] doc MCP config mirrored to ${resolveOpenClawCompatPath()}`);
     }
     if (config.isAuthed === false) {
-      log('[wecom] doc MCP config fetched, but document authorization is not yet complete');
+      log('[wecom] doc MCP config fetched with isAuthed=false; treat it as the latest auth snapshot and keep retrying MCP calls once the user finishes authorization');
     }
     return config;
   } catch (err) {

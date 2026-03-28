@@ -43,9 +43,29 @@ test('renderDocAuthGuide renders English unauthenticated guide', () => {
     }
   });
 
-  assert.match(output, /The bot has not completed WeCom document authorization yet\./);
+  assert.match(output, /The last fetched WeCom doc auth snapshot is still incomplete\./);
+  assert.match(output, /Keep using the current MCP URL and configure mcporter with it first/);
   assert.match(output, /Authorization page: https:\/\/work\.weixin\.qq\.com\/auth/);
+  assert.match(output, /isAuthed=false here is only the last fetched snapshot/);
   assert.match(output, /Config source: \/tmp\/wecom-mcp-config\.json/);
+});
+
+test('renderDocAuthGuide renders Chinese incomplete-auth guide as retry-first flow', () => {
+  const output = renderDocAuthGuide({
+    locale: 'zh-CN',
+    docConfig: {
+      type: 'streamable-http',
+      url: 'https://example.test/mcp',
+      source: '/tmp/wecom-mcp-config.json',
+      botId: 'aib9_example',
+      isAuthed: false
+    }
+  });
+
+  assert.match(output, /当前拿到的企业微信文档授权状态快照仍然是不完整。/);
+  assert.match(output, /先继续使用当前 MCP URL，把 mcporter 配好并直接尝试调用/);
+  assert.match(output, /isAuthed=false 只是上一次拉配置时看到的快照/);
+  assert.match(output, /当前 botId: aib9_example/);
 });
 
 test('renderDocAuthGuide renders Chinese missing-config guide', () => {
