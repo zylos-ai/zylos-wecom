@@ -173,9 +173,7 @@ const SEND_TIMEOUT = 10000; // 10 seconds
 const pendingSends = new Map(); // reqId -> { resolve, timer }
 const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
 const MARKDOWN_MAX_BYTES = 2000;
-const STREAM_MAX_BYTES = 20480;
 const STREAM_PLACEHOLDER = '<think></think>';
-const STREAM_PLACEHOLDER_MIN_MS = 3000;
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -774,41 +772,6 @@ async function sendReplyThenProactive(target, req, chunks) {
   return { ok: true, mode: 'reply+proactive', chunks: chunks.length };
 }
 
-async function sendStreamReply(target, req, text) {
-  const streamId = req.streamId || crypto.randomBytes(16).toString('hex');
-  req.streamId = streamId;
-  const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
-  if (!req.placeholderSent) {
-    const started = await sendReplyStream(req.reqId, streamId, placeholder, false);
-    if (!started.ok) {
-      return started;
-    }
-    req.placeholderSent = true;
-    req.placeholderSentAt = Date.now();
-  }
-
-  const placeholderMinMs = Number(config.message?.stream_placeholder_min_ms ?? STREAM_PLACEHOLDER_MIN_MS);
-  const elapsedMs = req.placeholderSentAt ? (Date.now() - req.placeholderSentAt) : placeholderMinMs;
-  if (placeholderMinMs > elapsedMs) {
-    await sleep(placeholderMinMs - elapsedMs);
-  }
-
-  const finished = await sendReplyStream(req.reqId, streamId, text, true);
-  if (finished.ok) {
-    return { ok: true, mode: 'stream', chunks: 1 };
-  }
-
-  console.log(`[wecom] Stream finish failed, falling back to proactive final send: ${finished.error || 'unknown error'}`);
-  if (req.placeholderSent) {
-    const placeholderResult = await finishPendingReplyPlaceholderByRequest(req);
-    if (!placeholderResult.ok) {
-      console.log(`[wecom] Failed to close thinking placeholder after stream failure: ${placeholderResult.error || 'unknown error'}`);
-    }
-  }
-  const fallback = await sendProactiveChunks(target, [text]);
-  return fallback.ok ? { ok: true, mode: 'stream+proactive-fallback', chunks: 1 } : fallback;
-}
-
 /**
  * Send a message to target, using reply mode if possible, falling back to proactive.
  * Returns Promise<{ok, error}>.
@@ -818,13 +781,6 @@ async function sendMessage(target, msgId, text) {
   if (!content) return { ok: true, mode: 'noop', chunks: 0 };
 
   const req = msgId ? getRequest(msgId) : null;
-  if (req && utf8ByteLength(content) <= STREAM_MAX_BYTES) {
-    console.log(`[wecom] Replying via stream reqId ${req.reqId.substring(0, 8)}... to ${target}`);
-    const streamResult = await sendStreamReply(target, req, content);
-    if (streamResult.ok) return streamResult;
-    console.log(`[wecom] Stream reply failed, falling back to markdown chunks: ${streamResult.error || 'unknown error'}`);
-  }
-
   const chunks = splitMessage(content, MARKDOWN_MAX_BYTES);
   if (req) {
     console.log(`[wecom] Replying via markdown reqId ${req.reqId.substring(0, 8)}... to ${target}`);
