@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, getCredentials } from './config.js';
 
 const DOC_BIZ_TYPE = 'doc';
 const DEFAULT_DOC_MCP_TYPE = 'streamable-http';
@@ -22,6 +22,7 @@ const BOT_ID_KEYS = [
   'aibot_id',
   'bot_id'
 ];
+const AUTHORIZATION_PAGE_BASE_URL = 'https://work.weixin.qq.com/ai/aiHelper/authorizationPage';
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -55,6 +56,22 @@ function readFirstResponseField(body, keys) {
     }
   }
   return undefined;
+}
+
+function readConfiguredBotId() {
+  const botId = getCredentials()?.bot_id;
+  return typeof botId === 'string' && botId.trim() ? botId.trim() : undefined;
+}
+
+function buildAuthorizationPageUrl(botId) {
+  if (!botId) return undefined;
+  const query = new URLSearchParams({
+    str_aibotid: botId,
+    type: '1',
+    from: 'chat',
+    forceInnerBrowser: '1'
+  });
+  return `${AUTHORIZATION_PAGE_BASE_URL}?${query.toString()}`;
 }
 
 async function serializeWrite(filePath, action) {
@@ -163,12 +180,16 @@ export async function fetchWecomDocMcpConfig({ request, timeoutMs = DEFAULT_FETC
     throw new Error('WeCom doc MCP config response missing url');
   }
 
+  const botId = readFirstResponseField(response?.body, BOT_ID_KEYS) || readConfiguredBotId();
+  const authPageUrl =
+    readFirstResponseField(response?.body, AUTH_PAGE_URL_KEYS) || buildAuthorizationPageUrl(botId);
+
   return {
     bizType: DOC_BIZ_TYPE,
     url,
     type: readResponseField(response?.body, 'type') || DEFAULT_DOC_MCP_TYPE,
-    authPageUrl: readFirstResponseField(response?.body, AUTH_PAGE_URL_KEYS),
-    botId: readFirstResponseField(response?.body, BOT_ID_KEYS),
+    authPageUrl,
+    botId,
     isAuthed: readResponseBoolean(response?.body, 'is_authed'),
     fetchedAt: Date.now()
   };

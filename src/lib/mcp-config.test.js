@@ -91,3 +91,32 @@ test('fetchWecomDocMcpConfig preserves auth metadata when provided', async () =>
   );
   assert.equal(config.botId, 'aib1_test');
 });
+
+test('fetchWecomDocMcpConfig derives auth metadata from configured bot id when response omits it', async () => {
+  const previousBotId = process.env.WECOM_BOT_ID;
+  process.env.WECOM_BOT_ID = 'aib9tgHEwLkicK4leYx2rtoFsKO5AJhukyk';
+
+  try {
+    const config = await fetchWecomDocMcpConfig({
+      request: async () => ({
+        body: {
+          url: 'https://example.test/mcp',
+          type: 'streamable-http',
+          is_authed: false
+        }
+      })
+    });
+
+    assert.equal(config.botId, 'aib9tgHEwLkicK4leYx2rtoFsKO5AJhukyk');
+    assert.equal(
+      config.authPageUrl,
+      'https://work.weixin.qq.com/ai/aiHelper/authorizationPage?str_aibotid=aib9tgHEwLkicK4leYx2rtoFsKO5AJhukyk&type=1&from=chat&forceInnerBrowser=1'
+    );
+  } finally {
+    if (previousBotId === undefined) {
+      delete process.env.WECOM_BOT_ID;
+    } else {
+      process.env.WECOM_BOT_ID = previousBotId;
+    }
+  }
+});
