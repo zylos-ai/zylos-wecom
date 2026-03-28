@@ -705,7 +705,19 @@ async function finishPendingReplyPlaceholder(msgId) {
     return { ok: true, mode: 'skip-no-placeholder' };
   }
 
-  return sendReplyStream(req.reqId, req.streamId, '', true);
+  return finishPendingReplyPlaceholderByRequest(req);
+}
+
+async function finishPendingReplyPlaceholderByRequest(req) {
+  if (!req || !req.placeholderSent) {
+    return { ok: true, mode: 'skip-no-placeholder' };
+  }
+
+  const result = await sendReplyStream(req.reqId, req.streamId, '', true);
+  if (result.ok) {
+    req.placeholderSent = false;
+  }
+  return result;
 }
 
 /**
@@ -738,6 +750,13 @@ async function sendProactiveChunks(target, chunks) {
 async function sendReplyThenProactive(target, req, chunks) {
   if (chunks.length === 0) {
     return { ok: true, mode: 'noop', chunks: 0 };
+  }
+
+  if (req.placeholderSent) {
+    const placeholderResult = await finishPendingReplyPlaceholderByRequest(req);
+    if (!placeholderResult.ok) {
+      console.log(`[wecom] Failed to close thinking placeholder before markdown reply: ${placeholderResult.error || 'unknown error'}`);
+    }
   }
 
   const first = await sendReply(req.reqId, chunks[0]);
@@ -780,6 +799,12 @@ async function sendStreamReply(target, req, text) {
   }
 
   console.log(`[wecom] Stream finish failed, falling back to proactive final send: ${finished.error || 'unknown error'}`);
+  if (req.placeholderSent) {
+    const placeholderResult = await finishPendingReplyPlaceholderByRequest(req);
+    if (!placeholderResult.ok) {
+      console.log(`[wecom] Failed to close thinking placeholder after stream failure: ${placeholderResult.error || 'unknown error'}`);
+    }
+  }
   const fallback = await sendProactiveChunks(target, [text]);
   return fallback.ok ? { ok: true, mode: 'stream+proactive-fallback', chunks: 1 } : fallback;
 }
