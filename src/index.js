@@ -23,6 +23,8 @@ dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
 import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
+import { t } from './lib/i18n/cli-messages.js';
+import { resolveLocale } from './lib/i18n/locale.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -36,6 +38,13 @@ let internalServer = null;
 let reconnectDelay = 1000;
 let authenticated = false;
 let subscribeReqId = null; // Track subscribe req_id for auth response matching
+
+function runtimeLocale() {
+  return resolveLocale({
+    configLocale: config?.message?.locale,
+    envLocale: process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG
+  });
+}
 
 // Initialize
 let config = getConfig();
@@ -344,7 +353,7 @@ function tryBindOwner(userId, userName) {
   };
 
   if (saveConfig(config)) {
-    console.log(`[wecom] Owner bound: ${userName} (${userId})`);
+    console.log(`[wecom] ${t(runtimeLocale(), 'runtime_owner_bound', { userName, userId })}`);
     return true;
   }
   return false;
@@ -500,7 +509,10 @@ function sendMessage(target, msgId, text) {
   if (msgId) {
     const req = getRequest(msgId);
     if (req) {
-      console.log(`[wecom] Replying via reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+      console.log(`[wecom] ${t(runtimeLocale(), 'runtime_reply_via_req', {
+        reqId: `${req.reqId.substring(0, 8)}...`,
+        target
+      })}`);
       return sendReply(req.reqId, text);
     }
   }
@@ -508,7 +520,7 @@ function sendMessage(target, msgId, text) {
   // Fallback: proactive send
   const entry = activatedTargets.get(target);
   const chatId = entry?.chatId || target;
-  console.log(`[wecom] Sending proactive to chatId: ${chatId}`);
+  console.log(`[wecom] ${t(runtimeLocale(), 'runtime_send_proactive', { chatId })}`);
   return sendProactive(chatId, text);
 }
 
@@ -529,7 +541,7 @@ async function processCallback(frame) {
     const msgType = body?.msgtype;
 
     if (!fromUser) {
-      console.log('[wecom] Ignoring message with no sender');
+      console.log(`[wecom] ${t(runtimeLocale(), 'runtime_ignore_no_sender')}`);
       return;
     }
 
@@ -562,7 +574,7 @@ async function processCallback(frame) {
     const isMentioned = isGroup && aibotId && body?.text?.content?.includes(`@${aibotId}`);
     if (isGroup) {
       if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
-        console.log(`[wecom] Group message from ${senderName} in ${chatId} blocked by policy`);
+        console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
         return;
       }
     } else {
@@ -570,7 +582,10 @@ async function processCallback(frame) {
         tryBindOwner(fromUser, senderName);
       }
       if (!checkDmPermission(fromUser)) {
-        console.log(`[wecom] DM from ${senderName} (${fromUser}) blocked by policy`);
+        console.log(`[wecom] ${t(runtimeLocale(), 'runtime_dm_blocked', {
+          senderName,
+          userId: fromUser
+        })}`);
         return;
       }
     }
@@ -662,7 +677,7 @@ async function processCallback(frame) {
 
   } else if (cmd === 'aibot_event_callback') {
     const eventType = body?.event?.eventtype || body?.msgtype;
-    console.log(`[wecom] Event received: ${eventType}`);
+    console.log(`[wecom] ${t(runtimeLocale(), 'runtime_event_received', { eventType })}`);
 
     // Handle enter_chat event
     if (eventType === 'enter_chat') {
@@ -729,7 +744,7 @@ function connect() {
           authenticated = true;
           subscribeReqId = null;
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
-          console.log('[wecom] Authenticated successfully');
+          console.log(`[wecom] ${t(runtimeLocale(), 'runtime_authenticated')}`);
           startHeartbeat();
           void fetchAndSaveWecomDocMcpConfig({
             accountId: 'default',
@@ -740,7 +755,9 @@ function connect() {
             error: (message) => console.error(message)
           });
         } else {
-          console.error(`[wecom] Authentication failed: ${JSON.stringify(frame)}`);
+          console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
+            frame: JSON.stringify(frame)
+          })}`);
           subscribeReqId = null;
           ws.close();
         }

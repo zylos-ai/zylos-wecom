@@ -113,7 +113,16 @@ const MESSAGES = {
     send_disabled: '错误: wecom 在配置中已禁用',
     send_sent_chunks: '已发送 {count} 个分片',
     send_success: '消息发送成功',
-    send_error: '错误: {message}'
+    send_error: '错误: {message}',
+    runtime_owner_bound: 'Owner 已绑定: {userName} ({userId})',
+    runtime_reply_via_req: '通过 reqId {reqId} 回复到 {target}',
+    runtime_send_proactive: '向 chatId 主动发送: {chatId}',
+    runtime_ignore_no_sender: '忽略没有发送者的消息',
+    runtime_group_blocked: '来自 {senderName} 的群消息在 {chatId} 被策略拦截',
+    runtime_dm_blocked: '来自 {senderName} ({userId}) 的私聊被策略拦截',
+    runtime_event_received: '收到事件: {eventType}',
+    runtime_authenticated: '认证成功',
+    runtime_auth_failed: '认证失败: {frame}'
   },
   'en-US': {
     admin_save_failed: 'Failed to save config',
@@ -166,7 +175,16 @@ const MESSAGES = {
     send_disabled: 'Error: wecom is disabled in config',
     send_sent_chunks: 'Sent {count} chunks',
     send_success: 'Message sent successfully',
-    send_error: 'Error: {message}'
+    send_error: 'Error: {message}',
+    runtime_owner_bound: 'Owner bound: {userName} ({userId})',
+    runtime_reply_via_req: 'Replying via reqId {reqId} to {target}',
+    runtime_send_proactive: 'Sending proactive to chatId: {chatId}',
+    runtime_ignore_no_sender: 'Ignoring message with no sender',
+    runtime_group_blocked: 'Group message from {senderName} in {chatId} blocked by policy',
+    runtime_dm_blocked: 'DM from {senderName} ({userId}) blocked by policy',
+    runtime_event_received: 'Event received: {eventType}',
+    runtime_authenticated: 'Authenticated successfully',
+    runtime_auth_failed: 'Authentication failed: {frame}'
   }
 };
 

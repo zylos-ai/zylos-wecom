@@ -22,4 +22,8 @@ test('t interpolates localized values', () => {
     t('en-US', 'setup_checked', { path: '/tmp/a.json' }),
     'Checked: /tmp/a.json'
   );
+  assert.equal(
+    t('en-US', 'runtime_group_blocked', { senderName: 'Alice', chatId: 'g1' }),
+    'Group message from Alice in g1 blocked by policy'
+  );
 });
