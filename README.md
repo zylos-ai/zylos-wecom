@@ -96,6 +96,7 @@ Send a message to your WeCom bot. The first private message sender becomes the o
   "message": {
     "context_messages": 10,
     "locale": "zh-CN",
+    "enable_thinking_placeholder": true,
     "welcome_text": "",
     "welcome_texts": {
       "zh-CN": "你好，我是 Zylos。",
@@ -124,6 +125,9 @@ $ADM list-dm-allow           # List DM allowlist
 $ADM add-dm-allow <user_id>  # Add user to allowlist
 $ADM help                    # Show all commands
 ```
+
+`message.enable_thinking_placeholder` controls the WeCom client "searching/thinking" placeholder bubble.
+Default is `true` (enabled). Set to `false` if you want to disable that bubble.
 
 ## Document MCP Bootstrap
 

@@ -47,6 +47,10 @@ function localizedRuntimeMessage(key, params = {}) {
   return t(runtimeLocale(), key, params);
 }
 
+function isThinkingPlaceholderEnabled() {
+  return config?.message?.enable_thinking_placeholder === true;
+}
+
 // Initialize
 let config = getConfig();
 const INTERNAL_SECRET = crypto.randomUUID();
@@ -126,7 +130,7 @@ const dedupCleanupInterval = setInterval(() => {
 // Request ID tracking (for reply vs proactive send)
 // ============================================================
 const REQ_ID_TTL = 5 * 60 * 1000; // 5 minutes (WeCom stream timeout is 6 min)
-const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt, streamId, placeholderSent, placeholderSentAt }
+const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt, streamId, placeholderSent, placeholderSentAt, placeholderInFlight }
 
 function trackRequest(msgId, reqId, chatId, userId, chatType) {
   pendingRequests.set(String(msgId), {
@@ -138,6 +142,7 @@ function trackRequest(msgId, reqId, chatId, userId, chatType) {
     streamId: crypto.randomBytes(16).toString('hex'),
     placeholderSent: false,
     placeholderSentAt: 0,
+    placeholderInFlight: null,
   });
 }
 
@@ -684,22 +689,34 @@ function sendReplyStream(reqId, streamId, text, finish = false) {
 
 async function sendInitialReplyPlaceholder(msgId) {
   const req = getRequest(msgId);
-  if (!req || req.placeholderSent) {
+  if (!req) {
+    return { ok: true, mode: 'placeholder-skipped' };
+  }
+  if (req.placeholderInFlight) {
+    return req.placeholderInFlight;
+  }
+  if (req.placeholderSent) {
     return { ok: true, mode: 'placeholder-skipped' };
   }
 
   const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
-  const result = await sendReplyStream(req.reqId, req.streamId, placeholder, false);
-  if (result.ok) {
-    req.placeholderSent = true;
-    req.placeholderSentAt = Date.now();
-  }
-  return result;
+  const inFlight = (async () => {
+    const result = await sendReplyStream(req.reqId, req.streamId, placeholder, false);
+    if (result.ok) {
+      req.placeholderSent = true;
+      req.placeholderSentAt = Date.now();
+    }
+    return result;
+  })();
+  req.placeholderInFlight = inFlight.finally(() => {
+    req.placeholderInFlight = null;
+  });
+  return req.placeholderInFlight;
 }
 
 async function finishPendingReplyPlaceholder(msgId) {
   const req = getRequest(msgId);
-  if (!req || !req.placeholderSent) {
+  if (!req) {
     return { ok: true, mode: 'skip-no-placeholder' };
   }
 
@@ -707,7 +724,17 @@ async function finishPendingReplyPlaceholder(msgId) {
 }
 
 async function finishPendingReplyPlaceholderByRequest(req) {
-  if (!req || !req.placeholderSent) {
+  if (!req) {
+    return { ok: true, mode: 'skip-no-placeholder' };
+  }
+  if (req.placeholderInFlight) {
+    try {
+      await req.placeholderInFlight;
+    } catch {
+      // ignore and continue best-effort close
+    }
+  }
+  if (!req.placeholderSent) {
     return { ok: true, mode: 'skip-no-placeholder' };
   }
 
@@ -865,7 +892,7 @@ async function processCallback(frame) {
       }
     }
 
-    if (reqId && msgId) {
+    if (reqId && msgId && isThinkingPlaceholderEnabled()) {
       sendInitialReplyPlaceholder(msgId).catch((err) => {
         console.error(`[wecom] Failed to send thinking placeholder ${msgId}: ${err.message}`);
       });

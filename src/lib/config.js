@@ -39,6 +39,7 @@ export const DEFAULT_CONFIG = {
   message: {
     context_messages: 10,
     locale: 'zh-CN',
+    enable_thinking_placeholder: true,
     welcome_text: '',  // legacy fallback; empty = no auto-reply; non-empty = auto-reply
     welcome_texts: {}  // locale-aware welcome messages, keyed by locale (e.g. zh-CN, en-US)
   },
