@@ -92,7 +92,7 @@ pm2 logs zylos-wecom
   "dmAllowFrom": [],
   "groupPolicy": "allowlist",
   "groups": {},
-  "message": { "context_messages": 10, "enable_thinking_placeholder": true, "welcome_text": "" },
+  "message": { "context_messages": 10, "welcome_text": "" },
   "ws": {
     "url": "wss://openws.work.weixin.qq.com",
     "heartbeat_interval": 30000,
@@ -114,9 +114,6 @@ $ADM list-dm-allow           # 查看私聊白名单
 $ADM add-dm-allow <user_id>  # 添加用户到白名单
 $ADM help                    # 显示所有命令
 ```
-
-`message.enable_thinking_placeholder` 用于控制企业微信客户端里的“正在搜索相关内容…”占位气泡。
-默认值是 `true`（开启）。如不需要该占位气泡可设为 `false`。
 
 ## 访问控制
 

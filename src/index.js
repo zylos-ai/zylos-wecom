@@ -47,10 +47,6 @@ function localizedRuntimeMessage(key, params = {}) {
   return t(runtimeLocale(), key, params);
 }
 
-function isThinkingPlaceholderEnabled() {
-  return config?.message?.enable_thinking_placeholder === true;
-}
-
 // Initialize
 let config = getConfig();
 const INTERNAL_SECRET = crypto.randomUUID();
@@ -130,7 +126,7 @@ const dedupCleanupInterval = setInterval(() => {
 // Request ID tracking (for reply vs proactive send)
 // ============================================================
 const REQ_ID_TTL = 5 * 60 * 1000; // 5 minutes (WeCom stream timeout is 6 min)
-const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt, streamId, placeholderSent, placeholderSentAt, placeholderInFlight }
+const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt }
 
 function trackRequest(msgId, reqId, chatId, userId, chatType) {
   pendingRequests.set(String(msgId), {
@@ -139,10 +135,6 @@ function trackRequest(msgId, reqId, chatId, userId, chatType) {
     userId,
     chatType,
     receivedAt: Date.now(),
-    streamId: crypto.randomBytes(16).toString('hex'),
-    placeholderSent: false,
-    placeholderSentAt: 0,
-    placeholderInFlight: null,
   });
 }
 
@@ -178,7 +170,6 @@ const SEND_TIMEOUT = 10000; // 10 seconds
 const pendingSends = new Map(); // reqId -> { resolve, timer }
 const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
 const MARKDOWN_MAX_BYTES = 2000;
-const STREAM_PLACEHOLDER = '<think></think>';
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -562,25 +553,6 @@ function buildRespondMsg(reqId, msgtype, body) {
   });
 }
 
-function buildRespondStream(reqId, streamId, content, finish = false) {
-  const stream = {
-    id: streamId,
-    finish,
-  };
-  if (String(content || '').trim()) {
-    stream.content = content;
-  }
-
-  return JSON.stringify({
-    cmd: 'aibot_respond_msg',
-    headers: { req_id: reqId },
-    body: {
-      msgtype: 'stream',
-      stream,
-    }
-  });
-}
-
 function buildSendMsg(chatId, msgtype, body) {
   return JSON.stringify({
     cmd: 'aibot_send_msg',
@@ -682,69 +654,6 @@ function sendReply(reqId, text) {
   return wsSend(data, reqId);
 }
 
-function sendReplyStream(reqId, streamId, text, finish = false) {
-  const data = buildRespondStream(reqId, streamId, text, finish);
-  return wsSend(data, reqId);
-}
-
-async function sendInitialReplyPlaceholder(msgId) {
-  const req = getRequest(msgId);
-  if (!req) {
-    return { ok: true, mode: 'placeholder-skipped' };
-  }
-  if (req.placeholderInFlight) {
-    return req.placeholderInFlight;
-  }
-  if (req.placeholderSent) {
-    return { ok: true, mode: 'placeholder-skipped' };
-  }
-
-  const placeholder = config.message?.stream_placeholder || STREAM_PLACEHOLDER;
-  const inFlight = (async () => {
-    const result = await sendReplyStream(req.reqId, req.streamId, placeholder, false);
-    if (result.ok) {
-      req.placeholderSent = true;
-      req.placeholderSentAt = Date.now();
-    }
-    return result;
-  })();
-  req.placeholderInFlight = inFlight.finally(() => {
-    req.placeholderInFlight = null;
-  });
-  return req.placeholderInFlight;
-}
-
-async function finishPendingReplyPlaceholder(msgId) {
-  const req = getRequest(msgId);
-  if (!req) {
-    return { ok: true, mode: 'skip-no-placeholder' };
-  }
-
-  return finishPendingReplyPlaceholderByRequest(req);
-}
-
-async function finishPendingReplyPlaceholderByRequest(req) {
-  if (!req) {
-    return { ok: true, mode: 'skip-no-placeholder' };
-  }
-  if (req.placeholderInFlight) {
-    try {
-      await req.placeholderInFlight;
-    } catch {
-      // ignore and continue best-effort close
-    }
-  }
-  if (!req.placeholderSent) {
-    return { ok: true, mode: 'skip-no-placeholder' };
-  }
-
-  const result = await sendReplyStream(req.reqId, req.streamId, '', true);
-  if (result.ok) {
-    req.placeholderSent = false;
-  }
-  return result;
-}
-
 /**
  * Send a proactive message to a chat.
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_send_msg.
@@ -775,13 +684,6 @@ async function sendProactiveChunks(target, chunks) {
 async function sendReplyThenProactive(target, req, chunks) {
   if (chunks.length === 0) {
     return { ok: true, mode: 'noop', chunks: 0 };
-  }
-
-  if (req.placeholderSent) {
-    const placeholderResult = await finishPendingReplyPlaceholderByRequest(req);
-    if (!placeholderResult.ok) {
-      console.log(`[wecom] Failed to close thinking placeholder before markdown reply: ${placeholderResult.error || 'unknown error'}`);
-    }
   }
 
   const first = await sendReply(req.reqId, chunks[0]);
@@ -819,10 +721,8 @@ async function sendMessage(target, msgId, text) {
 }
 
 async function skipMessage(target, msgId) {
-  if (msgId) {
-    const result = await finishPendingReplyPlaceholder(msgId);
-    if (result.ok) return result;
-  }
+  void target;
+  void msgId;
   return { ok: true, mode: 'skip' };
 }
 
@@ -890,12 +790,6 @@ async function processCallback(frame) {
         })}`);
         return;
       }
-    }
-
-    if (reqId && msgId && isThinkingPlaceholderEnabled()) {
-      sendInitialReplyPlaceholder(msgId).catch((err) => {
-        console.error(`[wecom] Failed to send thinking placeholder ${msgId}: ${err.message}`);
-      });
     }
 
   // Extract message content
