@@ -22,6 +22,9 @@ import WebSocket from 'ws';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
+import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
+import { t } from './lib/i18n/cli-messages.js';
+import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -36,6 +39,14 @@ let reconnectDelay = 1000;
 let authenticated = false;
 let subscribeReqId = null; // Track subscribe req_id for auth response matching
 
+function runtimeLocale() {
+  return resolveRuntimeLocale(config);
+}
+
+function localizedRuntimeMessage(key, params = {}) {
+  return t(runtimeLocale(), key, params);
+}
+
 // Initialize
 let config = getConfig();
 const INTERNAL_SECRET = crypto.randomUUID();
@@ -48,8 +59,8 @@ try {
 } catch (err) {
   console.error(`[wecom] Failed to write internal token file: ${err.message}`);
 }
-console.log(`[wecom] Starting (WebSocket mode)...`);
-console.log(`[wecom] Data directory: ${DATA_DIR}`);
+console.log(`[wecom] ${localizedRuntimeMessage('runtime_starting')}`);
+console.log(`[wecom] ${localizedRuntimeMessage('runtime_data_dir', { dir: DATA_DIR })}`);
 
 // Ensure directories
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
@@ -61,23 +72,23 @@ fs.mkdirSync(MEDIA_DIR, { recursive: true });
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
 
 if (!config.enabled) {
-  console.log(`[wecom] Component disabled in config, exiting.`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_disabled_exit')}`);
   process.exit(0);
 }
 
 // Verify required credentials
 const creds = getCredentials();
 if (!creds.bot_id || !creds.secret) {
-  console.error(`[wecom] ERROR: WECOM_BOT_ID and WECOM_BOT_SECRET must be set in ~/zylos/.env`);
+  console.error(`[wecom] ${localizedRuntimeMessage('runtime_missing_creds')}`);
   process.exit(1);
 }
 
 // Watch for config changes
 watchConfig((newConfig) => {
-  console.log(`[wecom] Config reloaded`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_config_reloaded')}`);
   config = newConfig;
   if (!newConfig.enabled) {
-    console.log(`[wecom] Component disabled, stopping...`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_disabled_stopping')}`);
     shutdown();
   }
 });
@@ -91,7 +102,7 @@ const processedMessages = new Map();
 function isDuplicate(msgId) {
   if (!msgId) return false;
   if (processedMessages.has(msgId)) {
-    console.log(`[wecom] Duplicate MsgId ${msgId}, skipping`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_duplicate_msg', { msgId })}`);
     return true;
   }
   processedMessages.set(msgId, Date.now());
@@ -118,7 +129,13 @@ const REQ_ID_TTL = 5 * 60 * 1000; // 5 minutes (WeCom stream timeout is 6 min)
 const pendingRequests = new Map(); // msgId -> { reqId, chatId, userId, chatType, receivedAt }
 
 function trackRequest(msgId, reqId, chatId, userId, chatType) {
-  pendingRequests.set(String(msgId), { reqId, chatId, userId, chatType, receivedAt: Date.now() });
+  pendingRequests.set(String(msgId), {
+    reqId,
+    chatId,
+    userId,
+    chatType,
+    receivedAt: Date.now(),
+  });
 }
 
 function getRequest(msgId) {
@@ -151,6 +168,9 @@ const reqCleanupInterval = setInterval(() => {
 // ============================================================
 const SEND_TIMEOUT = 10000; // 10 seconds
 const pendingSends = new Map(); // reqId -> { resolve, timer }
+const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
+const MARKDOWN_MAX_BYTES = 2000;
+const INTERNAL_BODY_MAX_BYTES = 1024 * 1024;
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -159,6 +179,15 @@ function resolvePendingSend(reqId, ok, errorMsg) {
     pendingSends.delete(reqId);
     pending.resolve({ ok, error: errorMsg || null });
   }
+}
+
+function resolvePendingRequest(reqId, payload) {
+  const pending = pendingRequestsByReqId.get(reqId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingRequestsByReqId.delete(reqId);
+  pending.resolve(payload);
+  return true;
 }
 
 // ============================================================
@@ -222,6 +251,204 @@ const userCachePersistInterval = setInterval(persistUserCache, 5 * 60 * 1000);
 loadUserCacheFromFile();
 
 // ============================================================
+// Media download helpers (WeCom WS encrypted file/image URLs)
+// ============================================================
+function sanitizeFilename(name, fallback = 'file.bin') {
+  const candidate = String(name || '').trim();
+  const base = path.basename(candidate || fallback);
+  const sanitized = base.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim();
+  return sanitized || fallback;
+}
+
+function buildUniqueMediaFilename(name, suffix) {
+  const sanitized = sanitizeFilename(name);
+  const ext = path.extname(sanitized);
+  const stem = ext ? sanitized.slice(0, -ext.length) : sanitized;
+  const normalizedSuffix = String(suffix || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${stem}_${normalizedSuffix}${ext}`;
+}
+
+function parseFilenameFromHeaders(headers, fallback) {
+  const contentDisposition = headers.get('content-disposition') || '';
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;\s]+)/i);
+  if (utf8Match) {
+    try {
+      return sanitizeFilename(decodeURIComponent(utf8Match[1]), fallback);
+    } catch {}
+  }
+
+  const plainMatch = contentDisposition.match(/filename="?([^";\s]+)"?/i);
+  if (plainMatch) {
+    try {
+      return sanitizeFilename(decodeURIComponent(plainMatch[1]), fallback);
+    } catch {}
+  }
+
+  return sanitizeFilename(fallback, fallback);
+}
+
+function decryptMediaBuffer(encryptedBuffer, aesKey) {
+  if (!Buffer.isBuffer(encryptedBuffer) || encryptedBuffer.length === 0) {
+    throw new Error('Encrypted media payload is empty');
+  }
+  if (!aesKey) return encryptedBuffer;
+
+  const key = Buffer.from(aesKey, 'base64');
+  const iv = key.subarray(0, 16);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+
+  // WeCom uses PKCS#7 padding to 32-byte boundaries, so strip manually.
+  decipher.setAutoPadding(false);
+  const decrypted = Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
+  const padLen = decrypted[decrypted.length - 1];
+
+  if (padLen < 1 || padLen > 32 || padLen > decrypted.length) {
+    throw new Error(`Invalid PKCS#7 padding: ${padLen}`);
+  }
+  for (let i = decrypted.length - padLen; i < decrypted.length; i++) {
+    if (decrypted[i] !== padLen) {
+      throw new Error('Invalid PKCS#7 padding bytes');
+    }
+  }
+
+  return decrypted.subarray(0, decrypted.length - padLen);
+}
+
+async function readResponseBufferWithinLimit(response, maxBytes) {
+  if (!response.body) {
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      throw new Error(`Media download exceeded ${maxBytes} bytes`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks, total);
+}
+
+async function downloadIncomingMedia(url, aesKey, preferredName, fallbackPrefix, msgId) {
+  if (!url) return null;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const maxDownloadBytes = Math.max(1, Number(config.media?.max_download_size_mb || 50)) * 1024 * 1024;
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > maxDownloadBytes) {
+    throw new Error(`Media download exceeded ${maxDownloadBytes} bytes`);
+  }
+
+  const encryptedBuffer = await readResponseBufferWithinLimit(response, maxDownloadBytes);
+  const buffer = decryptMediaBuffer(encryptedBuffer, aesKey);
+  const fallbackName = `${fallbackPrefix}_${String(msgId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const filename = buildUniqueMediaFilename(
+    parseFilenameFromHeaders(response.headers, preferredName || fallbackName),
+    msgId || Date.now()
+  );
+  const savePath = path.join(MEDIA_DIR, filename);
+
+  fs.writeFileSync(savePath, buffer);
+  return { path: savePath, filename, size: buffer.length };
+}
+
+function utf8ByteLength(text) {
+  return Buffer.byteLength(String(text || ''), 'utf8');
+}
+
+function sliceWithinUtf8Bytes(text, maxBytes) {
+  const input = String(text || '');
+  if (utf8ByteLength(input) <= maxBytes) return input;
+
+  let low = 0;
+  let high = input.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (utf8ByteLength(input.slice(0, mid)) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return input.slice(0, low);
+}
+
+function splitMessage(text, maxBytes) {
+  const input = String(text || '').trim();
+  if (!input) return [];
+  if (utf8ByteLength(input) <= maxBytes) return [input];
+
+  const chunks = [];
+  let remaining = input;
+
+  while (remaining.length > 0) {
+    if (utf8ByteLength(remaining) <= maxBytes) {
+      chunks.push(remaining);
+      break;
+    }
+
+    let candidate = sliceWithinUtf8Bytes(remaining, maxBytes);
+    if (!candidate) break;
+
+    let breakAt = candidate.length;
+    const fenceMatches = candidate.match(/```/g);
+    const insideCodeBlock = fenceMatches && fenceMatches.length % 2 !== 0;
+
+    if (insideCodeBlock) {
+      const lastFenceStart = candidate.lastIndexOf('```');
+      const lineBeforeFence = remaining.lastIndexOf('\n', lastFenceStart - 1);
+      if (lineBeforeFence > candidate.length * 0.2) {
+        breakAt = lineBeforeFence;
+      }
+    } else {
+      const lastParaBreak = candidate.lastIndexOf('\n\n');
+      if (lastParaBreak > candidate.length * 0.3) {
+        breakAt = lastParaBreak + 1;
+      } else {
+        const lastNewline = candidate.lastIndexOf('\n');
+        if (lastNewline > candidate.length * 0.3) {
+          breakAt = lastNewline;
+        } else {
+          const lastSpace = candidate.lastIndexOf(' ');
+          if (lastSpace > candidate.length * 0.3) {
+            breakAt = lastSpace;
+          }
+        }
+      }
+    }
+
+    const nextChunk = remaining.slice(0, breakAt).trim();
+    if (!nextChunk) {
+      const hardChunk = candidate.trim();
+      if (!hardChunk) break;
+      chunks.push(hardChunk);
+      remaining = remaining.slice(candidate.length).trim();
+      continue;
+    }
+
+    chunks.push(nextChunk);
+    remaining = remaining.slice(breakAt).trim();
+  }
+
+  return chunks;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================
 // In-memory chat history for context
 // ============================================================
 const DEFAULT_HISTORY_LIMIT = 5;
@@ -249,6 +476,38 @@ function getContextMessages(chatId, currentMsgId) {
   const filtered = history.filter(m => m.msgId !== currentMsgId);
   const count = Math.min(limit, filtered.length);
   return filtered.slice(-count);
+}
+
+function escapeXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/'/g, '&apos;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null) {
+  const prefix = chatType === 'group'
+    ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
+    : '[WeCom DM]';
+  const parts = [`${prefix} ${escapeXml(senderName)} said: `];
+
+  if (contextMessages.length > 0) {
+    const contextLines = contextMessages
+      .map((message) => `[${escapeXml(message.userName || message.userId || 'unknown')}]: ${escapeXml(message.text)}`)
+      .join('\n');
+    parts.push(`<group-context>\n${contextLines}\n</group-context>\n\n`);
+  }
+
+  parts.push(`<current-message>\n${escapeXml(text)}\n</current-message>`);
+
+  let message = parts.join('');
+  if (mediaPath) {
+    message += ` ---- file: ${escapeXml(mediaPath)}`;
+  }
+
+  return message;
 }
 
 // ============================================================
@@ -333,7 +592,7 @@ function tryBindOwner(userId, userName) {
   };
 
   if (saveConfig(config)) {
-    console.log(`[wecom] Owner bound: ${userName} (${userId})`);
+    console.log(`[wecom] ${t(runtimeLocale(), 'runtime_owner_bound', { userName, userId })}`);
     return true;
   }
   return false;
@@ -370,11 +629,26 @@ function buildRespondMsg(reqId, msgtype, body) {
 }
 
 function buildSendMsg(chatId, msgtype, body) {
-  return JSON.stringify({
-    cmd: 'aibot_send_msg',
-    headers: { req_id: crypto.randomUUID() },
-    body: { chatid: chatId, msgtype, ...body }
-  });
+  const reqId = crypto.randomUUID();
+  return {
+    reqId,
+    data: JSON.stringify({
+      cmd: 'aibot_send_msg',
+      headers: { req_id: reqId },
+      body: { chatid: chatId, msgtype, ...body }
+    })
+  };
+}
+
+function buildCommand(cmd, body, reqId = crypto.randomUUID()) {
+  return {
+    reqId,
+    data: JSON.stringify({
+      cmd,
+      headers: { req_id: reqId },
+      body
+    })
+  };
 }
 
 // ============================================================
@@ -386,14 +660,14 @@ function buildSendMsg(chatId, msgtype, body) {
  */
 function wsSendRaw(data) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error('[wecom] WebSocket not connected, cannot send');
+    console.error(`[wecom] ${localizedRuntimeMessage('runtime_ws_not_connected')}`);
     return false;
   }
   try {
     ws.send(data);
     return true;
   } catch (err) {
-    console.error(`[wecom] WebSocket send error: ${err.message}`);
+    console.error(`[wecom] ${localizedRuntimeMessage('runtime_ws_send_error', { message: err.message })}`);
     return false;
   }
 }
@@ -424,6 +698,52 @@ function wsSend(data, reqId) {
   });
 }
 
+function wsRequest(cmd, body, options = {}) {
+  const timeoutMs = options.timeoutMs || config.doc?.fetch_timeout_ms || 5000;
+  const { reqId, data } = buildCommand(cmd, body);
+
+  if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) {
+    return Promise.reject(new Error('WebSocket not ready'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequestsByReqId.delete(reqId);
+      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    pendingRequestsByReqId.set(reqId, { resolve, timer });
+
+    try {
+      ws.send(data);
+    } catch (err) {
+      clearTimeout(timer);
+      pendingRequestsByReqId.delete(reqId);
+      reject(err);
+    }
+  });
+}
+
+async function refreshDocMcpConfig() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) {
+    throw new Error('WebSocket not ready');
+  }
+
+  const refreshed = await fetchAndSaveWecomDocMcpConfig({
+    accountId: 'default',
+    request: (requestCmd, requestBody, options = {}) => wsRequest(requestCmd, requestBody, options),
+    timeoutMs: config.doc?.fetch_timeout_ms || 5000,
+    persistOpenClawCompat: config.doc?.persist_openclaw_compat !== false,
+    log: (message) => console.log(message),
+    error: (message) => console.error(message)
+  });
+
+  if (!refreshed) {
+    throw new Error('Failed to refresh doc MCP config');
+  }
+  return refreshed;
+}
+
 /**
  * Send a reply to a message callback (using original reqId).
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_respond_msg.
@@ -438,30 +758,70 @@ function sendReply(reqId, text) {
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_send_msg.
  */
 function sendProactive(chatId, text) {
-  const data = buildSendMsg(chatId, 'markdown', { markdown: { content: text } });
-  const parsed = JSON.parse(data);
-  return wsSend(data, parsed.headers.req_id);
+  const { data, reqId } = buildSendMsg(chatId, 'markdown', { markdown: { content: text } });
+  return wsSend(data, reqId);
+}
+
+function resolveChatTarget(target) {
+  const entry = activatedTargets.get(target);
+  return entry?.chatId || target;
+}
+
+async function sendProactiveChunks(target, chunks) {
+  const chatId = resolveChatTarget(target);
+  for (let i = 0; i < chunks.length; i++) {
+    const result = await sendProactive(chatId, chunks[i]);
+    if (!result.ok) return result;
+    if (i < chunks.length - 1) {
+      await sleep(500);
+    }
+  }
+  return { ok: true, mode: 'proactive', chunks: chunks.length };
+}
+
+async function sendReplyThenProactive(target, req, chunks) {
+  if (chunks.length === 0) {
+    return { ok: true, mode: 'noop', chunks: 0 };
+  }
+
+  const first = await sendReply(req.reqId, chunks[0]);
+  if (!first.ok) {
+    console.log(`[wecom] Reply send failed, falling back to proactive: ${first.error || 'unknown error'}`);
+    return sendProactiveChunks(target, chunks);
+  }
+
+  if (chunks.length === 1) {
+    return { ok: true, mode: 'reply', chunks: 1 };
+  }
+
+  const restResult = await sendProactiveChunks(target, chunks.slice(1));
+  if (!restResult.ok) return restResult;
+  return { ok: true, mode: 'reply+proactive', chunks: chunks.length };
 }
 
 /**
  * Send a message to target, using reply mode if possible, falling back to proactive.
  * Returns Promise<{ok, error}>.
  */
-function sendMessage(target, msgId, text) {
-  // Try reply mode first (using tracked reqId)
-  if (msgId) {
-    const req = getRequest(msgId);
-    if (req) {
-      console.log(`[wecom] Replying via reqId ${req.reqId.substring(0, 8)}... to ${target}`);
-      return sendReply(req.reqId, text);
-    }
+async function sendMessage(target, msgId, text) {
+  const content = String(text || '').trim();
+  if (!content) return { ok: true, mode: 'noop', chunks: 0 };
+
+  const req = msgId ? getRequest(msgId) : null;
+  const chunks = splitMessage(content, MARKDOWN_MAX_BYTES);
+  if (req) {
+    console.log(`[wecom] Replying via markdown reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+    return sendReplyThenProactive(target, req, chunks);
   }
 
-  // Fallback: proactive send
-  const entry = activatedTargets.get(target);
-  const chatId = entry?.chatId || target;
-  console.log(`[wecom] Sending proactive to chatId: ${chatId}`);
-  return sendProactive(chatId, text);
+  console.log(`[wecom] Sending proactive to chatId: ${resolveChatTarget(target)}`);
+  return sendProactiveChunks(target, chunks);
+}
+
+async function skipMessage(target, msgId) {
+  void target;
+  void msgId;
+  return { ok: true, mode: 'skip' };
 }
 
 // ============================================================
@@ -481,7 +841,7 @@ async function processCallback(frame) {
     const msgType = body?.msgtype;
 
     if (!fromUser) {
-      console.log('[wecom] Ignoring message with no sender');
+      console.log(`[wecom] ${t(runtimeLocale(), 'runtime_ignore_no_sender')}`);
       return;
     }
 
@@ -511,10 +871,13 @@ async function processCallback(frame) {
 
     // Permission check
     // For groups, detect if bot was @mentioned (used for mention mode filtering)
-    const isMentioned = isGroup && aibotId && body?.text?.content?.includes(`@${aibotId}`);
+    const isMentioned = isGroup && aibotId && (
+      body?.text?.content?.includes(`@${aibotId}`)
+      || body?.mixed?.items?.some((item) => item?.msgtype === 'text' && item?.text?.content?.includes(`@${aibotId}`))
+    );
     if (isGroup) {
       if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
-        console.log(`[wecom] Group message from ${senderName} in ${chatId} blocked by policy`);
+        console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
         return;
       }
     } else {
@@ -522,20 +885,41 @@ async function processCallback(frame) {
         tryBindOwner(fromUser, senderName);
       }
       if (!checkDmPermission(fromUser)) {
-        console.log(`[wecom] DM from ${senderName} (${fromUser}) blocked by policy`);
+        console.log(`[wecom] ${t(runtimeLocale(), 'runtime_dm_blocked', {
+          senderName,
+          userId: fromUser
+        })}`);
         return;
       }
     }
 
     // Extract message content
     let textContent = '';
+    let filePath = '';
 
     switch (msgType) {
       case 'text':
         textContent = body?.text?.content || '';
         break;
       case 'image':
-        textContent = `[image, url: ${body?.image?.url || 'N/A'}]`;
+        try {
+          const imageDownload = await downloadIncomingMedia(
+            body?.image?.url,
+            body?.image?.aeskey,
+            body?.image?.filename,
+            'wecom-image',
+            msgId
+          );
+          if (imageDownload) {
+            filePath = imageDownload.path;
+            textContent = `[image: ${imageDownload.filename}]`;
+          } else {
+            textContent = `[image]`;
+          }
+        } catch (err) {
+          console.error(`[wecom] Failed to download image ${msgId}: ${err.message}`);
+          textContent = `[image]`;
+        }
         break;
       case 'voice':
         textContent = body?.voice?.transcription || `[voice message]`;
@@ -544,7 +928,24 @@ async function processCallback(frame) {
         textContent = `[video message]`;
         break;
       case 'file':
-        textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+        try {
+          const fileDownload = await downloadIncomingMedia(
+            body?.file?.url,
+            body?.file?.aeskey,
+            body?.file?.filename,
+            'wecom-file',
+            msgId
+          );
+          if (fileDownload) {
+            filePath = fileDownload.path;
+            textContent = `[file: ${fileDownload.filename}]`;
+          } else {
+            textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+          }
+        } catch (err) {
+          console.error(`[wecom] Failed to download file ${msgId}: ${err.message}`);
+          textContent = `[file: ${body?.file?.filename || 'unknown'}]`;
+        }
         break;
       case 'mixed': {
         // Mixed message: text + images
@@ -582,45 +983,35 @@ async function processCallback(frame) {
       timestamp: new Date().toISOString()
     });
 
-    // Build C4 formatted message
-    let formattedMessage;
-
     if (isGroup) {
       const groupName = config.groups?.[chatId]?.name || chatId;
-      formattedMessage = `[WeCom GROUP:${groupName}] ${senderName} said: ${textContent}`;
-
       const context = getContextMessages(chatId, msgId);
-      if (context.length > 0) {
-        const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
-        formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
-      }
-
+      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName);
       const endpoint = `${chatId}|type:group|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     } else {
-      formattedMessage = `[WeCom DM] ${senderName} said: ${textContent}`;
-
       const context = getContextMessages(fromUser, msgId);
-      if (context.length > 0) {
-        const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
-        formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
-      }
-
+      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath);
       const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     }
 
-    console.log(`[wecom] ${isGroup ? 'Group' : 'DM'} from ${senderName}: ${textContent.slice(0, 100)}`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_message_summary', {
+      kind: localizedRuntimeMessage(isGroup ? 'runtime_kind_group' : 'runtime_kind_dm'),
+      senderName,
+      content: textContent.slice(0, 100)
+    })}`);
 
   } else if (cmd === 'aibot_event_callback') {
     const eventType = body?.event?.eventtype || body?.msgtype;
-    console.log(`[wecom] Event received: ${eventType}`);
+    console.log(`[wecom] ${t(runtimeLocale(), 'runtime_event_received', { eventType })}`);
 
     // Handle enter_chat event
     if (eventType === 'enter_chat') {
       const reqId = headers?.req_id;
       if (reqId) {
-        const welcomeText = config.message?.welcome_text;
+        const welcome = resolveWelcomeMessage(config);
+        const welcomeText = welcome.text;
         if (welcomeText) {
           // Auto-reply with configured welcome message
           wsSendRaw(JSON.stringify({
@@ -628,6 +1019,9 @@ async function processCallback(frame) {
             headers: { req_id: reqId },
             body: { msgtype: 'text', text: { content: welcomeText } }
           }));
+          console.log(`[wecom] ${localizedRuntimeMessage(
+            welcome.source === 'localized' ? 'runtime_welcome_locale' : 'runtime_welcome_fallback'
+          )}`);
         }
         // If welcome_text is empty, the event is silently ignored
         // (Claude handles greetings via normal message flow)
@@ -660,12 +1054,12 @@ function connect() {
   if (isShuttingDown) return;
 
   const wsUrl = config.ws?.url || 'wss://openws.work.weixin.qq.com';
-  console.log(`[wecom] Connecting to ${wsUrl}...`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_connecting', { url: wsUrl })}`);
 
   ws = new WebSocket(wsUrl);
 
   ws.on('open', () => {
-    console.log('[wecom] WebSocket connected, authenticating...');
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_ws_authenticating')}`);
     wsSendRaw(buildSubscribe());
   });
 
@@ -681,10 +1075,13 @@ function connect() {
           authenticated = true;
           subscribeReqId = null;
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
-          console.log('[wecom] Authenticated successfully');
+          console.log(`[wecom] ${t(runtimeLocale(), 'runtime_authenticated')}`);
           startHeartbeat();
+          void refreshDocMcpConfig().catch(() => {});
         } else {
-          console.error(`[wecom] Authentication failed: ${JSON.stringify(frame)}`);
+          console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
+            frame: JSON.stringify(frame)
+          })}`);
           subscribeReqId = null;
           ws.close();
         }
@@ -699,7 +1096,7 @@ function connect() {
       // Handle message/event callbacks
       if (cmd === 'aibot_msg_callback' || cmd === 'aibot_event_callback') {
         processCallback(frame).catch(err => {
-          console.error(`[wecom] Callback processing error: ${err.message}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_callback_error', { message: err.message })}`);
         });
         return;
       }
@@ -708,7 +1105,10 @@ function connect() {
       if (cmd === 'aibot_respond_msg' || cmd === 'aibot_send_msg') {
         const ok = !frame.body?.code || frame.body.code === 0;
         if (!ok) {
-          console.error(`[wecom] Send error (${cmd}): ${JSON.stringify(frame.body)}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_body', {
+            cmd,
+            body: JSON.stringify(frame.body)
+          })}`);
         }
         if (frameReqId) resolvePendingSend(frameReqId, ok, ok ? null : frame.body?.msg);
         return;
@@ -716,18 +1116,30 @@ function connect() {
 
       // Handle generic responses without cmd (e.g., error frames)
       if (!cmd && frame.errcode !== undefined && frameReqId) {
+        if (resolvePendingRequest(frameReqId, frame)) {
+          return;
+        }
         const ok = frame.errcode === 0;
         if (!ok) {
-          console.error(`[wecom] Send error: ${JSON.stringify(frame)}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_frame', {
+            frame: JSON.stringify(frame)
+          })}`);
         }
         resolvePendingSend(frameReqId, ok, ok ? null : frame.errmsg);
         return;
       }
 
+      // Handle request/response style commands such as aibot_get_mcp_config.
+      if (frameReqId && resolvePendingRequest(frameReqId, frame)) {
+        return;
+      }
+
       // Log unknown frames with full content for debugging
-      console.log(`[wecom] Unknown frame: ${JSON.stringify(frame).substring(0, 500)}`);
+      console.log(`[wecom] ${localizedRuntimeMessage('runtime_unknown_frame', {
+        frame: JSON.stringify(frame).substring(0, 500)
+      })}`);
     } catch (err) {
-      console.error(`[wecom] Failed to parse message: ${err.message}`);
+      console.error(`[wecom] ${localizedRuntimeMessage('runtime_parse_failed', { message: err.message })}`);
     }
   });
 
@@ -741,15 +1153,20 @@ function connect() {
       pending.resolve({ ok: false, error: 'WebSocket closed' });
     }
     pendingSends.clear();
+    for (const [reqId, pending] of pendingRequestsByReqId) {
+      clearTimeout(pending.timer);
+      pending.resolve({ errcode: -1, errmsg: 'WebSocket closed' });
+    }
+    pendingRequestsByReqId.clear();
     const reasonStr = reason?.toString() || 'unknown';
-    console.log(`[wecom] WebSocket closed: ${code} ${reasonStr}`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_ws_closed', { code, reason: reasonStr })}`);
     scheduleReconnect();
   });
 
   ws.on('error', (err) => {
     // Suppress expected close errors
     if (err.message?.includes('WebSocket was closed') || isShuttingDown) return;
-    console.error(`[wecom] WebSocket error: ${err.message}`);
+    console.error(`[wecom] ${localizedRuntimeMessage('runtime_ws_error', { message: err.message })}`);
   });
 }
 
@@ -764,7 +1181,9 @@ function scheduleReconnect() {
   const jitter = delay * (0.75 + Math.random() * 0.5);
   const actualDelay = Math.round(jitter);
 
-  console.log(`[wecom] Reconnecting in ${Math.round(actualDelay / 1000)}s...`);
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_reconnecting', {
+    seconds: Math.round(actualDelay / 1000)
+  })}`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
@@ -787,8 +1206,21 @@ function startInternalServer() {
     }
 
     let body = '';
-    req.on('data', chunk => { body += chunk; });
+    let bodySize = 0;
+    req.on('data', chunk => {
+      bodySize += chunk.length;
+      if (bodySize > INTERNAL_BODY_MAX_BYTES) {
+        if (!res.headersSent) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Request body too large' }));
+        }
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', async () => {
+      if (res.headersSent) return;
       try {
         const data = JSON.parse(body);
         await handleInternalRequest(req.url, data, res);
@@ -800,27 +1232,29 @@ function startInternalServer() {
           res.end(JSON.stringify({ error }));
         }
         if (!(err instanceof SyntaxError)) {
-          console.error(`[wecom] Internal request handling failed: ${err.message}`);
+          console.error(`[wecom] ${localizedRuntimeMessage('runtime_internal_request_failed', {
+            message: err.message
+          })}`);
         }
       }
     });
   });
 
   internalServer.listen(port, '127.0.0.1', () => {
-    console.log(`[wecom] Internal API on 127.0.0.1:${port}`);
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_internal_api', { port })}`);
   });
 }
 
 async function handleInternalRequest(url, data, res) {
   if (url === '/internal/send') {
-    const { target, msgId, content } = data;
-    if (!target || !content) {
+    const { target, msgId, content, skip } = data;
+    if (!target || (!skip && !content)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Missing target or content' }));
       return;
     }
 
-    const result = await sendMessage(target, msgId, content);
+    const result = skip ? await skipMessage(target, msgId) : await sendMessage(target, msgId, content);
     res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
 
@@ -843,6 +1277,17 @@ async function handleInternalRequest(url, data, res) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
 
+  } else if (url === '/internal/refresh-doc-mcp') {
+    try {
+      const refreshed = await refreshDocMcpConfig();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, config: refreshed }));
+    } catch (err) {
+      const status = err.message === 'WebSocket not ready' ? 503 : 500;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+
   } else {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
@@ -855,7 +1300,7 @@ async function handleInternalRequest(url, data, res) {
 startInternalServer();
 connect();
 
-console.log(`[wecom] Bot ID: ${creds.bot_id.substring(0, 8)}...`);
+console.log(`[wecom] ${localizedRuntimeMessage('runtime_bot_id', { botId: `${creds.bot_id.substring(0, 8)}...` })}`);
 
 // ============================================================
 // Graceful shutdown
@@ -863,7 +1308,7 @@ console.log(`[wecom] Bot ID: ${creds.bot_id.substring(0, 8)}...`);
 async function shutdown() {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  console.log('[wecom] Shutting down...');
+  console.log(`[wecom] ${localizedRuntimeMessage('runtime_shutting_down')}`);
 
   // Stop config watcher
   stopWatching();
@@ -890,13 +1335,13 @@ async function shutdown() {
   // Close internal server
   if (internalServer) {
     internalServer.close(() => {
-      console.log('[wecom] Internal server closed');
+      console.log(`[wecom] ${localizedRuntimeMessage('runtime_internal_server_closed')}`);
     });
   }
 
   // Force exit after timeout
   setTimeout(() => {
-    console.log('[wecom] Force exit after timeout');
+    console.log(`[wecom] ${localizedRuntimeMessage('runtime_force_exit')}`);
     process.exit(0);
   }, 5000);
 }
@@ -905,10 +1350,11 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 process.on('uncaughtException', (err) => {
-  console.error(`[wecom] Uncaught exception: ${err.message}`);
+  console.error(`[wecom] ${localizedRuntimeMessage('runtime_uncaught_exception', { message: err.message })}`);
   console.error(err.stack);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error(`[wecom] Unhandled rejection:`, reason);
+  const reasonText = reason instanceof Error ? reason.message : String(reason);
+  console.error(`[wecom] ${localizedRuntimeMessage('runtime_unhandled_rejection', { reason: reasonText })}`);
 });

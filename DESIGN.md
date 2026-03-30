@@ -68,6 +68,17 @@ send.js (spawned by C4 in a separate process) communicates with the main process
 
 Authenticated with a random UUID token written to `.internal-token` file at startup.
 
+### Document MCP Bootstrap
+
+After WS authentication succeeds, the service performs a best-effort `aibot_get_mcp_config` request for `biz_type: "doc"`.
+
+The result is persisted for later doc skill usage:
+
+- Zylos-native path: `~/zylos/components/wecom/wecom-mcp-config.json`
+- OpenClaw-compatible mirror: `~/.openclaw/wecomConfig/config.json`
+
+This keeps document execution out of the always-on channel service while still allowing later `mcporter`-based document workflows.
+
 ### User Name Resolution
 
 Without corp API access (no `corpSecret`), user names are:

@@ -23,13 +23,20 @@ import path from 'path';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, DATA_DIR } from '../src/lib/config.js';
-
-const MAX_LENGTH = 2000; // WeCom text message max length
+import { t } from '../src/lib/i18n/cli-messages.js';
+import { parseLocaleArg, resolveLocale, stripLocaleArg } from '../src/lib/i18n/locale.js';
 
 // Parse arguments
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const config = getConfig();
+const locale = resolveLocale({
+  cliLocale: parseLocaleArg(rawArgs),
+  configLocale: config?.message?.locale,
+  envLocale: process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG
+});
+const args = stripLocaleArg(rawArgs);
 if (args.length < 2) {
-  console.error('Usage: send.js <endpoint_id> <message>');
+  console.error(t(locale, 'send_usage'));
   process.exit(1);
 }
 
@@ -61,81 +68,15 @@ const targetUser = parsedEndpoint.userId;
 const msgId = parsedEndpoint.msg || '';
 
 if (message.trim() === '[SKIP]') {
-  process.exit(0);
+  if (!msgId) {
+    process.exit(0);
+  }
 }
 
 // Check if component is enabled
-const config = getConfig();
 if (!config.enabled) {
-  console.error('Error: wecom is disabled in config');
+  console.error(t(locale, 'send_disabled'));
   process.exit(1);
-}
-
-/**
- * Split long message into chunks (markdown-aware).
- */
-function splitMessage(text, maxLength) {
-  if (text.length <= maxLength) return [text];
-
-  const chunks = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
-      const finalChunk = remaining.trim();
-      if (finalChunk.length > 0) {
-        chunks.push(finalChunk);
-      }
-      break;
-    }
-
-    let breakAt = maxLength;
-
-    const segment = remaining.substring(0, breakAt);
-    const fenceMatches = segment.match(/```/g);
-    const insideCodeBlock = fenceMatches && fenceMatches.length % 2 !== 0;
-
-    if (insideCodeBlock) {
-      const lastFenceStart = segment.lastIndexOf('```');
-      const lineBeforeFence = remaining.lastIndexOf('\n', lastFenceStart - 1);
-      if (lineBeforeFence > maxLength * 0.2) {
-        breakAt = lineBeforeFence;
-      } else {
-        const fenceEnd = remaining.indexOf('```', lastFenceStart + 3);
-        if (fenceEnd !== -1) {
-          const blockEnd = remaining.indexOf('\n', fenceEnd + 3);
-          breakAt = blockEnd !== -1 ? blockEnd + 1 : fenceEnd + 3;
-        }
-        if (breakAt > maxLength) {
-          breakAt = maxLength;
-        }
-      }
-    } else {
-      const chunk = remaining.substring(0, breakAt);
-      const lastParaBreak = chunk.lastIndexOf('\n\n');
-      if (lastParaBreak > maxLength * 0.3) {
-        breakAt = lastParaBreak + 1;
-      } else {
-        const lastNewline = chunk.lastIndexOf('\n');
-        if (lastNewline > maxLength * 0.3) {
-          breakAt = lastNewline;
-        } else {
-          const lastSpace = chunk.lastIndexOf(' ');
-          if (lastSpace > maxLength * 0.3) {
-            breakAt = lastSpace;
-          }
-        }
-      }
-    }
-
-    const nextChunk = remaining.substring(0, breakAt).trim();
-    if (nextChunk.length > 0) {
-      chunks.push(nextChunk);
-    }
-    remaining = remaining.substring(breakAt).trim();
-  }
-
-  return chunks;
 }
 
 /**
@@ -152,14 +93,14 @@ function getInternalToken() {
 /**
  * Send a request to the internal API.
  */
-async function internalSend(target, msgId, content) {
+async function internalSend(target, msgId, content, skip = false) {
   const token = getInternalToken();
   if (!token) {
     throw new Error('Internal token not available — is the main process running?');
   }
 
   const port = config.internal_port || 4459;
-  const body = JSON.stringify({ target, msgId, content });
+  const body = JSON.stringify({ target, msgId, content, skip });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -216,37 +157,17 @@ async function recordOutgoing(text) {
   }
 }
 
-/**
- * Send text message with auto-chunking.
- */
-async function sendText(target, msgId, text) {
-  const chunks = splitMessage(text, MAX_LENGTH);
-
-  for (let i = 0; i < chunks.length; i++) {
-    // For the first chunk, use the original msgId (enables reply mode)
-    // For subsequent chunks, no msgId (proactive send)
-    const chunkMsgId = i === 0 ? msgId : '';
-    await internalSend(target, chunkMsgId, chunks[i]);
-
-    // Small delay between chunks
-    if (i < chunks.length - 1) {
-      await new Promise(r => setTimeout(r, 500));
-    }
-  }
-
-  if (chunks.length > 1) {
-    console.log(`Sent ${chunks.length} chunks`);
-  }
-}
-
 async function send() {
   try {
-    await sendText(targetUser, msgId, message);
-    await recordOutgoing(message);
-    console.log('Message sent successfully');
+    const skip = message.trim() === '[SKIP]';
+    await internalSend(targetUser, msgId, skip ? '' : message, skip);
+    if (!skip) {
+      await recordOutgoing(message);
+    }
+    console.log(t(locale, 'send_success'));
     process.exit(0);
   } catch (err) {
-    console.error(`Error: ${err.message}`);
+    console.error(t(locale, 'send_error', { message: err.message }));
     process.exit(1);
   }
 }
