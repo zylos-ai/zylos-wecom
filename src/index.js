@@ -435,6 +435,38 @@ function getContextMessages(chatId, currentMsgId) {
   return filtered.slice(-count);
 }
 
+function escapeXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/'/g, '&apos;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null) {
+  const prefix = chatType === 'group'
+    ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
+    : '[WeCom DM]';
+  const parts = [`${prefix} ${escapeXml(senderName)} said: `];
+
+  if (contextMessages.length > 0) {
+    const contextLines = contextMessages
+      .map((message) => `[${escapeXml(message.userName || message.userId || 'unknown')}]: ${escapeXml(message.text)}`)
+      .join('\n');
+    parts.push(`<group-context>\n${contextLines}\n</group-context>\n\n`);
+  }
+
+  parts.push(`<current-message>\n${escapeXml(text)}\n</current-message>`);
+
+  let message = parts.join('');
+  if (mediaPath) {
+    message += ` ---- file: ${escapeXml(mediaPath)}`;
+  }
+
+  return message;
+}
+
 // ============================================================
 // Helper: forward message to C4
 // ============================================================
@@ -902,38 +934,15 @@ async function processCallback(frame) {
       timestamp: new Date().toISOString()
     });
 
-    // Build C4 formatted message
-    let formattedMessage;
-
     if (isGroup) {
       const groupName = config.groups?.[chatId]?.name || chatId;
-      formattedMessage = `[WeCom GROUP:${groupName}] ${senderName} said: ${textContent}`;
-
       const context = getContextMessages(chatId, msgId);
-      if (context.length > 0) {
-        const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
-        formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
-      }
-
-      if (filePath) {
-        formattedMessage += ` ---- file: ${filePath}`;
-      }
-
+      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName);
       const endpoint = `${chatId}|type:group|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     } else {
-      formattedMessage = `[WeCom DM] ${senderName} said: ${textContent}`;
-
       const context = getContextMessages(fromUser, msgId);
-      if (context.length > 0) {
-        const contextLines = context.map(m => `${m.userName}: ${m.text}`).join('\n');
-        formattedMessage += `\n\n--- recent context ---\n${contextLines}`;
-      }
-
-      if (filePath) {
-        formattedMessage += ` ---- file: ${filePath}`;
-      }
-
+      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath);
       const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     }
