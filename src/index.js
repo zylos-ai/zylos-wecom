@@ -170,6 +170,7 @@ const SEND_TIMEOUT = 10000; // 10 seconds
 const pendingSends = new Map(); // reqId -> { resolve, timer }
 const pendingRequestsByReqId = new Map(); // reqId -> { resolve, timer }
 const MARKDOWN_MAX_BYTES = 2000;
+const INTERNAL_BODY_MAX_BYTES = 1024 * 1024;
 
 function resolvePendingSend(reqId, ok, errorMsg) {
   const pending = pendingSends.get(reqId);
@@ -259,6 +260,14 @@ function sanitizeFilename(name, fallback = 'file.bin') {
   return sanitized || fallback;
 }
 
+function buildUniqueMediaFilename(name, suffix) {
+  const sanitized = sanitizeFilename(name);
+  const ext = path.extname(sanitized);
+  const stem = ext ? sanitized.slice(0, -ext.length) : sanitized;
+  const normalizedSuffix = String(suffix || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${stem}_${normalizedSuffix}${ext}`;
+}
+
 function parseFilenameFromHeaders(headers, fallback) {
   const contentDisposition = headers.get('content-disposition') || '';
   const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;\s]+)/i);
@@ -279,6 +288,9 @@ function parseFilenameFromHeaders(headers, fallback) {
 }
 
 function decryptMediaBuffer(encryptedBuffer, aesKey) {
+  if (!Buffer.isBuffer(encryptedBuffer) || encryptedBuffer.length === 0) {
+    throw new Error('Encrypted media payload is empty');
+  }
   if (!aesKey) return encryptedBuffer;
 
   const key = Buffer.from(aesKey, 'base64');
@@ -302,6 +314,28 @@ function decryptMediaBuffer(encryptedBuffer, aesKey) {
   return decrypted.subarray(0, decrypted.length - padLen);
 }
 
+async function readResponseBufferWithinLimit(response, maxBytes) {
+  if (!response.body) {
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      throw new Error(`Media download exceeded ${maxBytes} bytes`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks, total);
+}
+
 async function downloadIncomingMedia(url, aesKey, preferredName, fallbackPrefix, msgId) {
   if (!url) return null;
 
@@ -310,10 +344,19 @@ async function downloadIncomingMedia(url, aesKey, preferredName, fallbackPrefix,
     throw new Error(`HTTP ${response.status}`);
   }
 
-  const encryptedBuffer = Buffer.from(await response.arrayBuffer());
+  const maxDownloadBytes = Math.max(1, Number(config.media?.max_download_size_mb || 50)) * 1024 * 1024;
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > maxDownloadBytes) {
+    throw new Error(`Media download exceeded ${maxDownloadBytes} bytes`);
+  }
+
+  const encryptedBuffer = await readResponseBufferWithinLimit(response, maxDownloadBytes);
   const buffer = decryptMediaBuffer(encryptedBuffer, aesKey);
   const fallbackName = `${fallbackPrefix}_${String(msgId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-  const filename = parseFilenameFromHeaders(response.headers, preferredName || fallbackName);
+  const filename = buildUniqueMediaFilename(
+    parseFilenameFromHeaders(response.headers, preferredName || fallbackName),
+    msgId || Date.now()
+  );
   const savePath = path.join(MEDIA_DIR, filename);
 
   fs.writeFileSync(savePath, buffer);
@@ -586,11 +629,15 @@ function buildRespondMsg(reqId, msgtype, body) {
 }
 
 function buildSendMsg(chatId, msgtype, body) {
-  return JSON.stringify({
-    cmd: 'aibot_send_msg',
-    headers: { req_id: crypto.randomUUID() },
-    body: { chatid: chatId, msgtype, ...body }
-  });
+  const reqId = crypto.randomUUID();
+  return {
+    reqId,
+    data: JSON.stringify({
+      cmd: 'aibot_send_msg',
+      headers: { req_id: reqId },
+      body: { chatid: chatId, msgtype, ...body }
+    })
+  };
 }
 
 function buildCommand(cmd, body, reqId = crypto.randomUUID()) {
@@ -711,9 +758,8 @@ function sendReply(reqId, text) {
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_send_msg.
  */
 function sendProactive(chatId, text) {
-  const data = buildSendMsg(chatId, 'markdown', { markdown: { content: text } });
-  const parsed = JSON.parse(data);
-  return wsSend(data, parsed.headers.req_id);
+  const { data, reqId } = buildSendMsg(chatId, 'markdown', { markdown: { content: text } });
+  return wsSend(data, reqId);
 }
 
 function resolveChatTarget(target) {
@@ -825,7 +871,10 @@ async function processCallback(frame) {
 
     // Permission check
     // For groups, detect if bot was @mentioned (used for mention mode filtering)
-    const isMentioned = isGroup && aibotId && body?.text?.content?.includes(`@${aibotId}`);
+    const isMentioned = isGroup && aibotId && (
+      body?.text?.content?.includes(`@${aibotId}`)
+      || body?.mixed?.items?.some((item) => item?.msgtype === 'text' && item?.text?.content?.includes(`@${aibotId}`))
+    );
     if (isGroup) {
       if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
@@ -844,34 +893,34 @@ async function processCallback(frame) {
       }
     }
 
-  // Extract message content
-  let textContent = '';
-  let filePath = '';
+    // Extract message content
+    let textContent = '';
+    let filePath = '';
 
-  switch (msgType) {
-    case 'text':
-      textContent = body?.text?.content || '';
-      break;
-    case 'image':
-      try {
-        const imageDownload = await downloadIncomingMedia(
-          body?.image?.url,
-          body?.image?.aeskey,
-          body?.image?.filename,
-          'wecom-image',
-          msgId
-        );
-        if (imageDownload) {
-          filePath = imageDownload.path;
-          textContent = `[image: ${imageDownload.filename}]`;
-        } else {
+    switch (msgType) {
+      case 'text':
+        textContent = body?.text?.content || '';
+        break;
+      case 'image':
+        try {
+          const imageDownload = await downloadIncomingMedia(
+            body?.image?.url,
+            body?.image?.aeskey,
+            body?.image?.filename,
+            'wecom-image',
+            msgId
+          );
+          if (imageDownload) {
+            filePath = imageDownload.path;
+            textContent = `[image: ${imageDownload.filename}]`;
+          } else {
+            textContent = `[image]`;
+          }
+        } catch (err) {
+          console.error(`[wecom] Failed to download image ${msgId}: ${err.message}`);
           textContent = `[image]`;
         }
-      } catch (err) {
-        console.error(`[wecom] Failed to download image ${msgId}: ${err.message}`);
-        textContent = `[image]`;
-      }
-      break;
+        break;
       case 'voice':
         textContent = body?.voice?.transcription || `[voice message]`;
         break;
@@ -1157,8 +1206,21 @@ function startInternalServer() {
     }
 
     let body = '';
-    req.on('data', chunk => { body += chunk; });
+    let bodySize = 0;
+    req.on('data', chunk => {
+      bodySize += chunk.length;
+      if (bodySize > INTERNAL_BODY_MAX_BYTES) {
+        if (!res.headersSent) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Request body too large' }));
+        }
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', async () => {
+      if (res.headersSent) return;
       try {
         const data = JSON.parse(body);
         await handleInternalRequest(req.url, data, res);

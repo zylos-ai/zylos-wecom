@@ -51,6 +51,24 @@ function runMcporter(args) {
   return spawnSync('mcporter', args, { stdio: 'pipe', encoding: 'utf8' });
 }
 
+function getExistingMcporterServer(name) {
+  const result = runMcporter(['config', 'get', name, '--json']);
+  if (result.status !== 0) return null;
+  try {
+    return JSON.parse(result.stdout || '{}');
+  } catch {
+    return null;
+  }
+}
+
+function resolveServerUrl(server) {
+  return typeof server?.baseUrl === 'string' ? server.baseUrl : '';
+}
+
+function resolveServerTransport(server) {
+  return typeof server?.transport === 'string' ? server.transport : '';
+}
+
 function getInternalToken() {
   try {
     return fs.readFileSync(path.join(os.homedir(), 'zylos', 'components', 'wecom', '.internal-token'), 'utf8').trim();
@@ -107,7 +125,32 @@ if (!docConfig) {
 
 const probe = runMcporter(['list', 'wecom-doc', '--output', 'json']);
 if (probe.status === 0) {
-  console.log(t(locale, 'setup_already_configured'));
+  const existing = getExistingMcporterServer('wecom-doc');
+  const currentUrl = resolveServerUrl(existing);
+  const currentTransport = resolveServerTransport(existing);
+  const needsUpdate = currentUrl !== docConfig.url || currentTransport !== 'http';
+
+  if (!needsUpdate) {
+    console.log(t(locale, 'setup_already_configured'));
+    if (docConfig.isAuthed === false) {
+      console.log(t(locale, 'setup_auth_incomplete_warning'));
+      if (docConfig.authPageUrl) {
+        console.log(t(locale, 'setup_auth_page', { url: docConfig.authPageUrl }));
+      } else if (docConfig.botId) {
+        console.log(t(locale, 'setup_bot_id', { botId: docConfig.botId }));
+      }
+    }
+    process.stdout.write(probe.stdout || '');
+    process.exit(0);
+  }
+
+  const update = runMcporter(['config', 'add', 'wecom-doc', '--url', docConfig.url]);
+  if (update.status !== 0) {
+    process.stderr.write(update.stderr || '');
+    process.exit(update.status || 1);
+  }
+
+  console.log(t(locale, 'setup_configured_from', { source: docConfig.source }));
   if (docConfig.isAuthed === false) {
     console.log(t(locale, 'setup_auth_incomplete_warning'));
     if (docConfig.authPageUrl) {
@@ -116,7 +159,12 @@ if (probe.status === 0) {
       console.log(t(locale, 'setup_bot_id', { botId: docConfig.botId }));
     }
   }
-  process.stdout.write(probe.stdout || '');
+  const verifyExisting = runMcporter(['list', 'wecom-doc', '--output', 'json']);
+  if (verifyExisting.stdout) process.stdout.write(verifyExisting.stdout);
+  if (verifyExisting.status !== 0) {
+    process.stderr.write(verifyExisting.stderr || '');
+    process.exit(verifyExisting.status || 1);
+  }
   process.exit(0);
 }
 
@@ -125,7 +173,7 @@ if (probe.error && probe.error.code === 'ENOENT') {
   process.exit(1);
 }
 
-const add = runMcporter(['config', 'add', 'wecom-doc', '--type', docConfig.type, '--url', docConfig.url]);
+const add = runMcporter(['config', 'add', 'wecom-doc', '--url', docConfig.url]);
 if (add.status !== 0) {
   process.stderr.write(add.stderr || '');
   process.exit(add.status || 1);

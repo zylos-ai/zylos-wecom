@@ -161,7 +161,9 @@ async function send() {
   try {
     const skip = message.trim() === '[SKIP]';
     await internalSend(targetUser, msgId, skip ? '' : message, skip);
-    await recordOutgoing(message);
+    if (!skip) {
+      await recordOutgoing(message);
+    }
     console.log(t(locale, 'send_success'));
     process.exit(0);
   } catch (err) {

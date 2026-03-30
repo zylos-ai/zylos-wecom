@@ -120,3 +120,16 @@ test('fetchWecomDocMcpConfig derives auth metadata from configured bot id when r
     }
   }
 });
+
+test('fetchWecomDocMcpConfig rejects unsupported url schemes', async () => {
+  await assert.rejects(
+    fetchWecomDocMcpConfig({
+      request: async () => ({
+        body: {
+          url: 'ftp://example.test/mcp'
+        }
+      })
+    }),
+    /unsupported url protocol/
+  );
+});

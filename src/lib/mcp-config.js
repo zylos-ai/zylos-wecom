@@ -63,6 +63,19 @@ function readConfiguredBotId() {
   return typeof botId === 'string' && botId.trim() ? botId.trim() : undefined;
 }
 
+function validateHttpUrl(value, label) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`WeCom doc MCP config response contains an invalid ${label}`);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error(`WeCom doc MCP config response contains an unsupported ${label} protocol`);
+  }
+  return parsed.toString();
+}
+
 function buildAuthorizationPageUrl(botId) {
   if (!botId) return undefined;
   const query = new URLSearchParams({
@@ -71,7 +84,7 @@ function buildAuthorizationPageUrl(botId) {
     from: 'chat',
     forceInnerBrowser: '1'
   });
-  return `${AUTHORIZATION_PAGE_BASE_URL}?${query.toString()}`;
+  return validateHttpUrl(`${AUTHORIZATION_PAGE_BASE_URL}?${query.toString()}`, 'authPageUrl');
 }
 
 async function serializeWrite(filePath, action) {
@@ -186,9 +199,9 @@ export async function fetchWecomDocMcpConfig({ request, timeoutMs = DEFAULT_FETC
 
   return {
     bizType: DOC_BIZ_TYPE,
-    url,
+    url: validateHttpUrl(url, 'url'),
     type: readResponseField(response?.body, 'type') || DEFAULT_DOC_MCP_TYPE,
-    authPageUrl,
+    authPageUrl: authPageUrl ? validateHttpUrl(authPageUrl, 'authPageUrl') : undefined,
     botId,
     isAuthed: readResponseBoolean(response?.body, 'is_authed'),
     fetchedAt: Date.now()

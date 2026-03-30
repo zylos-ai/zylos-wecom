@@ -47,6 +47,10 @@ export const DEFAULT_CONFIG = {
     fetch_timeout_ms: 5000,
     persist_openclaw_compat: true
   },
+  // Media download settings
+  media: {
+    max_download_size_mb: 50
+  },
   // WebSocket settings
   ws: {
     url: 'wss://openws.work.weixin.qq.com',
@@ -77,6 +81,7 @@ export function loadConfig() {
       config.owner = { ...DEFAULT_CONFIG.owner, ...parsed.owner };
       config.message = { ...DEFAULT_CONFIG.message, ...parsed.message };
       config.doc = { ...DEFAULT_CONFIG.doc, ...parsed.doc };
+      config.media = { ...DEFAULT_CONFIG.media, ...parsed.media };
       config.ws = { ...DEFAULT_CONFIG.ws, ...parsed.ws };
     } else {
       console.warn(`[wecom] ${t(configLocale(DEFAULT_CONFIG), 'config_file_missing', { path: CONFIG_PATH })}`);
