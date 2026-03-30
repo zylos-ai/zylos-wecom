@@ -51,7 +51,7 @@ In `extensions/wecom/src/ws-gateway.ts`:
 
 ### 2. Skill-side document execution
 
-In `extensions/wecom/skills/wecom-doc/SKILL.md`:
+In the repo skill guide:
 
 - checks `mcporter`
 - checks whether `wecom-doc` is already configured
@@ -164,7 +164,7 @@ Add a separate skill under the skill runtime, not inside the PM2 service logic.
 
 Recommended location in this repo:
 
-- `skills/wecom-doc/SKILL.md`
+- `SKILL.md`
 
 Responsibilities:
 
@@ -357,7 +357,7 @@ Keep the first PR narrow:
 
 1. add MCP config fetch/persist helper
 2. call it after WS auth
-3. add `skills/wecom-doc/SKILL.md`
+3. add the doc-MCP section into `SKILL.md`
 4. document paths and behavior in README / DESIGN
 
 Do not include in the first PR:

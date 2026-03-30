@@ -165,8 +165,6 @@ pm2 restart zylos-wecom
 
 ## 企业微信文档 MCP
 
-这个部分同步自 `skills/wecom-doc/SKILL.md`，用于通过 `mcporter` 调用企业微信文档 MCP（包含智能表格）。
-
 这个 skill 只负责通过 `mcporter` 调用企业微信文档 MCP，不要直接调用 Wedoc API。
 
 ### 使用时机
