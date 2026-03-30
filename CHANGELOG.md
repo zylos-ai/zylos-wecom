@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.2] - 2026-03-30
+
+### Added
+- WeCom doc MCP bootstrap flow and auth guidance updates
+- Locale-aware runtime / CLI / welcome / doc-auth messaging
+- OpenClaw-style thinking placeholder and stream reply alignment
+
+### Changed
+- Refresh WeCom doc MCP config on demand
+- Normalize WeCom C4 message wrapper to structured `group-context` / `current-message` format with XML escaping
+
 ## [0.1.1] - 2026-03-21
 
 ### Changed
