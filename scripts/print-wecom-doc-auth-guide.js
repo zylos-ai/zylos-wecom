@@ -45,13 +45,60 @@ function resolveDocConfig() {
   return null;
 }
 
-const docConfig = resolveDocConfig();
+function getInternalToken() {
+  try {
+    return fs.readFileSync(path.join(os.homedir(), 'zylos', 'components', 'wecom', '.internal-token'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 const runtimeConfig = getConfig();
 const locale = resolveDocAuthGuideLocale({
   cliLocale: parseLocaleArg(process.argv.slice(2)),
   configLocale: runtimeConfig?.message?.locale,
   envLocale: process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG
 });
+
+async function refreshDocConfigFromRuntime() {
+  const token = getInternalToken();
+  if (!token) return null;
+
+  const port = runtimeConfig.internal_port || 4459;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), (runtimeConfig.doc?.fetch_timeout_ms || 5000) + 2000);
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/internal/refresh-doc-mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Token': token
+      },
+      body: '{}',
+      signal: controller.signal
+    });
+
+    if (!res.ok) return null;
+    const payload = await res.json();
+    if (!payload?.ok || !payload?.config?.url) return null;
+
+    return {
+      url: payload.config.url,
+      type: payload.config.type || 'streamable-http',
+      authPageUrl: payload.config.authPageUrl || '',
+      botId: payload.config.botId || '',
+      isAuthed: typeof payload.config.isAuthed === 'boolean' ? payload.config.isAuthed : undefined,
+      source: 'runtime-refresh'
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const docConfig = await refreshDocConfigFromRuntime() || resolveDocConfig();
 
 console.log(renderDocAuthGuide({
   locale,

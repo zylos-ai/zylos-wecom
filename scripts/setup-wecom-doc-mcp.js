@@ -51,7 +51,53 @@ function runMcporter(args) {
   return spawnSync('mcporter', args, { stdio: 'pipe', encoding: 'utf8' });
 }
 
-const docConfig = resolveDocConfig();
+function getInternalToken() {
+  try {
+    return fs.readFileSync(path.join(os.homedir(), 'zylos', 'components', 'wecom', '.internal-token'), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+async function refreshDocConfigFromRuntime() {
+  const token = getInternalToken();
+  if (!token) return null;
+
+  const port = runtimeConfig.internal_port || 4459;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), (runtimeConfig.doc?.fetch_timeout_ms || 5000) + 2000);
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/internal/refresh-doc-mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Token': token
+      },
+      body: '{}',
+      signal: controller.signal
+    });
+
+    if (!res.ok) return null;
+    const payload = await res.json();
+    if (!payload?.ok || !payload?.config?.url) return null;
+
+    return {
+      type: payload.config.type || 'streamable-http',
+      url: payload.config.url,
+      authPageUrl: payload.config.authPageUrl || '',
+      botId: payload.config.botId || '',
+      isAuthed: typeof payload.config.isAuthed === 'boolean' ? payload.config.isAuthed : undefined,
+      source: 'runtime-refresh'
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const docConfig = await refreshDocConfigFromRuntime() || resolveDocConfig();
 if (!docConfig) {
   console.error(t(locale, 'setup_no_config'));
   console.error(t(locale, 'setup_checked', { path: ZYLOS_CONFIG_PATH }));

@@ -645,6 +645,26 @@ function wsRequest(cmd, body, options = {}) {
   });
 }
 
+async function refreshDocMcpConfig() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) {
+    throw new Error('WebSocket not ready');
+  }
+
+  const refreshed = await fetchAndSaveWecomDocMcpConfig({
+    accountId: 'default',
+    request: (requestCmd, requestBody, options = {}) => wsRequest(requestCmd, requestBody, options),
+    timeoutMs: config.doc?.fetch_timeout_ms || 5000,
+    persistOpenClawCompat: config.doc?.persist_openclaw_compat !== false,
+    log: (message) => console.log(message),
+    error: (message) => console.error(message)
+  });
+
+  if (!refreshed) {
+    throw new Error('Failed to refresh doc MCP config');
+  }
+  return refreshed;
+}
+
 /**
  * Send a reply to a message callback (using original reqId).
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_respond_msg.
@@ -999,14 +1019,7 @@ function connect() {
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
           console.log(`[wecom] ${t(runtimeLocale(), 'runtime_authenticated')}`);
           startHeartbeat();
-          void fetchAndSaveWecomDocMcpConfig({
-            accountId: 'default',
-            request: (requestCmd, requestBody, options = {}) => wsRequest(requestCmd, requestBody, options),
-            timeoutMs: config.doc?.fetch_timeout_ms || 5000,
-            persistOpenClawCompat: config.doc?.persist_openclaw_compat !== false,
-            log: (message) => console.log(message),
-            error: (message) => console.error(message)
-          });
+          void refreshDocMcpConfig().catch(() => {});
         } else {
           console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
             frame: JSON.stringify(frame)
@@ -1192,6 +1205,17 @@ async function handleInternalRequest(url, data, res) {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+
+  } else if (url === '/internal/refresh-doc-mcp') {
+    try {
+      const refreshed = await refreshDocMcpConfig();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, config: refreshed }));
+    } catch (err) {
+      const status = err.message === 'WebSocket not ready' ? 503 : 500;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
 
   } else {
     res.writeHead(404, { 'Content-Type': 'application/json' });
