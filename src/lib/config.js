@@ -13,6 +13,8 @@ import { resolveRuntimeLocale } from './i18n/runtime.js';
 const HOME = process.env.HOME;
 export const DATA_DIR = path.join(HOME, 'zylos/components/wecom');
 export const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+export const ENV_PATH = path.join(HOME, 'zylos/.env');
+export const SCAN_SESSION_PATH = path.join(DATA_DIR, 'scan-session.json');
 
 // Default configuration
 export const DEFAULT_CONFIG = {
@@ -196,4 +198,43 @@ export function getCredentials() {
     bot_id: process.env.WECOM_BOT_ID || '',
     secret: process.env.WECOM_BOT_SECRET || ''
   };
+}
+
+export function saveCredentialsToEnv({ bot_id, secret }) {
+  const botId = String(bot_id || '').trim();
+  const normalizedSecret = String(secret || '').trim();
+  if (!botId || !normalizedSecret) {
+    throw new Error('bot_id and secret are required');
+  }
+
+  fs.mkdirSync(path.dirname(ENV_PATH), { recursive: true });
+  const current = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8') : '';
+  const lines = current === '' ? [] : current.replace(/\r\n/g, '\n').split('\n');
+  while (lines.length > 0 && lines.at(-1) === '') {
+    lines.pop();
+  }
+
+  const setLine = (key, value) => {
+    const nextLine = `${key}=${value}`;
+    const index = lines.findIndex((line) => line.startsWith(`${key}=`));
+    if (index === -1) {
+      lines.push(nextLine);
+    } else {
+      lines[index] = nextLine;
+    }
+  };
+
+  setLine('WECOM_BOT_ID', botId);
+  setLine('WECOM_BOT_SECRET', normalizedSecret);
+
+  const payload = `${lines.join('\n')}\n`;
+  const tempPath = `${ENV_PATH}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempPath, payload, { mode: 0o600 });
+  fs.renameSync(tempPath, ENV_PATH);
+  fs.chmodSync(ENV_PATH, 0o600);
+
+  process.env.WECOM_BOT_ID = botId;
+  process.env.WECOM_BOT_SECRET = normalizedSecret;
+
+  return ENV_PATH;
 }
