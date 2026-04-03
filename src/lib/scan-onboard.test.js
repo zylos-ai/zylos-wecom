@@ -110,7 +110,8 @@ test('pollScanSession persists credentials and clears the session on success', a
 
     assert.deepEqual(result, {
       status: 'connected',
-      botId: 'bot-123'
+      botId: 'bot-123',
+      botSecret: 'secret-456'
     });
     assert.equal(fs.existsSync(sessionPath), false);
     assert.equal(

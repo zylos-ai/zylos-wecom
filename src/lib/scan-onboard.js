@@ -225,7 +225,8 @@ export async function pollScanSession({
     clearScanSession(sessionPath);
     return {
       status: 'connected',
-      botId
+      botId,
+      botSecret: secret
     };
   }
 
