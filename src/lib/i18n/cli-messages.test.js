@@ -6,6 +6,7 @@ import { describeDmPolicy, renderAdminHelp, t } from './cli-messages.js';
 test('renderAdminHelp returns localized help text', () => {
   assert.match(renderAdminHelp('zh-CN'), /管理 CLI/);
   assert.match(renderAdminHelp('en-US'), /admin CLI/);
+  assert.match(renderAdminHelp('zh-CN'), /scan-onboard/);
 });
 
 test('describeDmPolicy returns localized descriptions', () => {
@@ -33,5 +34,9 @@ test('t interpolates localized values', () => {
   assert.equal(
     t('en-US', 'config_watch_reloading'),
     'Config file changed, reloading...'
+  );
+  assert.equal(
+    t('en-US', 'runtime_missing_creds'),
+    'ERROR: WECOM_BOT_ID and WECOM_BOT_SECRET must be set in ~/zylos/.env'
   );
 });

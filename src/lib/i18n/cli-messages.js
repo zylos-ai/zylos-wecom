@@ -23,6 +23,7 @@ zylos-wecom 管理 CLI（WebSocket Bot 模式）
   remove-dm-allow <user_id>           从 dmAllowFrom 移除用户
 
   show-owner                          显示当前 owner
+  scan-onboard                        扫码获取 Bot ID/Secret 并回填到现有 .env
 
 权限流：
   私聊：dmPolicy (open|allowlist|owner) + dmAllowFrom
@@ -51,6 +52,7 @@ Commands:
   remove-dm-allow <user_id>           Remove user from dmAllowFrom
 
   show-owner                          Show current owner
+  scan-onboard                        Scan QR to fetch Bot ID/Secret into the existing .env
 
 Permission flow:
   Private DM: dmPolicy (open|allowlist|owner) + dmAllowFrom
@@ -99,6 +101,8 @@ const MESSAGES = {
     admin_owner: 'Owner: {name}',
     admin_owner_user_id: '  user_id: {userId}',
     admin_no_owner: '当前还没有 owner（第一个私聊用户会自动成为 owner）',
+    admin_scan_saved: '扫码凭证已写入 {path} (Bot ID: {botId})',
+    admin_scan_failed: '扫码接入失败: {message}',
     admin_unknown_command: '未知命令: {command}',
     setup_no_config: '没有找到 WeCom doc MCP 配置。',
     setup_checked: '已检查: {path}',
@@ -160,7 +164,21 @@ const MESSAGES = {
     config_watch_reloading: '配置文件已变化，正在重载...',
     config_watch_error: '配置 watcher 错误: {message}',
     runtime_uncaught_exception: '未捕获异常: {message}',
-    runtime_unhandled_rejection: '未处理的 Promise 拒绝: {reason}'
+    runtime_unhandled_rejection: '未处理的 Promise 拒绝: {reason}',
+    scan_fetching_qr: '正在获取企业微信扫码二维码...',
+    scan_prompt: '请使用企业微信扫描下方二维码完成机器人绑定：',
+    scan_alt_url: '如果终端二维码显示异常，也可打开这个链接扫码：{url}',
+    scan_waiting: '等待扫码结果中...',
+    scan_success: '扫码成功，Bot ID 和 Secret 已自动获取。',
+    scan_timeout: '扫码超时（5 分钟），请重试。',
+    scan_http_error: '企业微信扫码接口请求失败，HTTP {status}',
+    scan_generate_parse_error: '解析二维码生成响应失败',
+    scan_query_parse_error: '解析扫码轮询响应失败',
+    scan_generate_missing_fields: '二维码生成成功，但返回里缺少 scode 或 auth_url',
+    scan_missing_bot_info: '扫码成功，但没有拿到 Bot ID 或 Secret',
+    scan_terminal_status: '扫码流程结束于异常状态: {status}',
+    scan_session_missing: '扫码会话不存在或已失效',
+    scan_session_mismatch: '扫码会话不匹配，请刷新二维码后重试'
   },
   'en-US': {
     admin_save_failed: 'Failed to save config',
@@ -199,6 +217,8 @@ const MESSAGES = {
     admin_owner: 'Owner: {name}',
     admin_owner_user_id: '  user_id: {userId}',
     admin_no_owner: 'No owner bound (first private message user will become owner)',
+    admin_scan_saved: 'Scanned credentials written to {path} (Bot ID: {botId})',
+    admin_scan_failed: 'Scan onboarding failed: {message}',
     admin_unknown_command: 'Unknown command: {command}',
     setup_no_config: 'No WeCom doc MCP config found.',
     setup_checked: 'Checked: {path}',
@@ -260,7 +280,21 @@ const MESSAGES = {
     config_watch_reloading: 'Config file changed, reloading...',
     config_watch_error: 'Config watcher error: {message}',
     runtime_uncaught_exception: 'Uncaught exception: {message}',
-    runtime_unhandled_rejection: 'Unhandled rejection: {reason}'
+    runtime_unhandled_rejection: 'Unhandled rejection: {reason}',
+    scan_fetching_qr: 'Fetching WeCom onboarding QR code...',
+    scan_prompt: 'Scan the QR code below with WeCom to bind the bot:',
+    scan_alt_url: 'If the terminal QR does not render well, open this URL instead: {url}',
+    scan_waiting: 'Waiting for scan result...',
+    scan_success: 'Scan succeeded. Bot ID and Secret were fetched automatically.',
+    scan_timeout: 'Scan timed out after 5 minutes. Please retry.',
+    scan_http_error: 'WeCom scan endpoint request failed with HTTP {status}',
+    scan_generate_parse_error: 'Failed to parse QR generate response',
+    scan_query_parse_error: 'Failed to parse QR polling response',
+    scan_generate_missing_fields: 'QR code generation response is missing scode or auth_url',
+    scan_missing_bot_info: 'Scan succeeded but Bot ID or Secret was missing',
+    scan_terminal_status: 'Scan flow ended in terminal status: {status}',
+    scan_session_missing: 'Scan session is missing or has expired',
+    scan_session_mismatch: 'Scan session mismatch. Refresh the QR code and try again'
   }
 };
 

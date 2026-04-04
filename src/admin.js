@@ -6,9 +6,10 @@
  * Usage: node admin.js <command> [args]
  */
 
-import { loadConfig, saveConfig } from './lib/config.js';
+import { loadConfig, saveConfig, saveCredentialsToEnv } from './lib/config.js';
 import { t, renderAdminHelp, describeDmPolicy } from './lib/i18n/cli-messages.js';
 import { parseLocaleArg, resolveLocale, stripLocaleArg } from './lib/i18n/locale.js';
+import { scanQRCodeForBotInfo } from './lib/scan-onboard.js';
 
 const rawCliArgs = process.argv.slice(2);
 const configForLocale = loadConfig();
@@ -222,6 +223,21 @@ const commands = {
     }
   },
 
+  'scan-onboard': async () => {
+    try {
+      const { botId, secret } = await scanQRCodeForBotInfo({ locale });
+      const path = saveCredentialsToEnv({
+        bot_id: botId,
+        secret
+      });
+      console.log(t(locale, 'admin_scan_saved', { path, botId }));
+      console.log(t(locale, 'admin_restart_hint'));
+    } catch (err) {
+      console.error(t(locale, 'admin_scan_failed', { message: err.message }));
+      process.exit(1);
+    }
+  },
+
   'help': () => {
     console.log(renderAdminHelp(locale));
   }
@@ -231,7 +247,7 @@ const commands = {
 const command = cliArgs[0] || 'help';
 
 if (commands[command]) {
-  commands[command](...cliArgs.slice(1));
+  await commands[command](...cliArgs.slice(1));
 } else {
   console.error(t(locale, 'admin_unknown_command', { command }));
   commands.help();

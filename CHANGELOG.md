@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3] - 2026-04-04
+
+### Added
+- Dashboard-driven WeCom scan onboarding flow with reusable QR session polling
+
+### Changed
+- Return `botSecret` alongside `botId` after WeCom scan onboarding succeeds so dashboard reconciliation can persist refreshed credentials
+- Restart the `zylos-wecom` PM2 service after scan onboarding succeeds, with ecosystem fallback when the process was deleted
+
 ## [0.1.2] - 2026-03-30
 
 ### Added
