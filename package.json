@@ -1,6 +1,6 @@
 {
   "name": "zylos-wecom",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "WeCom (企业微信) communication channel for Zylos agents - WebSocket bot mode",
   "type": "module",
   "main": "src/index.js",
