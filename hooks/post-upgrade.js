@@ -41,9 +41,10 @@ if (fs.existsSync(configPath)) {
 
     // Migration 2: Remove old webhook_port (replaced by internal_port)
     if (config.webhook_port !== undefined) {
+      config._legacy_webhook_port = config.webhook_port;
       delete config.webhook_port;
       migrated = true;
-      migrations.push('Removed webhook_port (WebSocket mode)');
+      migrations.push('Removed webhook_port (WebSocket mode) — preserved as _legacy_webhook_port');
     }
 
     // Migration 3: Ensure internal_port
@@ -55,16 +56,18 @@ if (fs.existsSync(configPath)) {
 
     // Migration 4: Remove old bot.agent_id (not used in WebSocket mode)
     if (config.bot) {
+      config._legacy_bot = config.bot;
       delete config.bot;
       migrated = true;
-      migrations.push('Removed bot config (WebSocket mode)');
+      migrations.push('Removed bot config (WebSocket mode) — preserved as _legacy_bot');
     }
 
     // Migration 5: Remove old proxy config (not used in WebSocket mode)
     if (config.proxy) {
+      config._legacy_proxy = config.proxy;
       delete config.proxy;
       migrated = true;
-      migrations.push('Removed proxy config (WebSocket mode)');
+      migrations.push('Removed proxy config (WebSocket mode) — preserved as _legacy_proxy');
     }
 
     // Migration 6: Ensure owner structure
@@ -119,14 +122,16 @@ if (fs.existsSync(configPath)) {
         migrations.push('Added message.welcome_text');
       }
       if (config.message.useMarkdownCard !== undefined) {
+        config._legacy_message_useMarkdownCard = config.message.useMarkdownCard;
         delete config.message.useMarkdownCard;
         migrated = true;
-        migrations.push('Removed deprecated message.useMarkdownCard');
+        migrations.push('Removed deprecated message.useMarkdownCard — preserved as _legacy_message_useMarkdownCard');
       }
       if (config.message.useMarkdown !== undefined) {
+        config._legacy_message_useMarkdown = config.message.useMarkdown;
         delete config.message.useMarkdown;
         migrated = true;
-        migrations.push('Removed deprecated message.useMarkdown');
+        migrations.push('Removed deprecated message.useMarkdown — preserved as _legacy_message_useMarkdown');
       }
     }
 
