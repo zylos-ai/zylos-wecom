@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4] - 2026-05-18
+
+### Fixed
+- Post-upgrade hook now backs up `config.json` to
+  `config.json.backup.<ISO-timestamp>` before mutation and uses atomic
+  write (temp + rename) for the new config (#7)
+
+### Removed
+- Reverted in-config `_legacy_*` field injection
+  (`_legacy_webhook_port`, `_legacy_bot`, `_legacy_proxy`,
+  `_legacy_message_useMarkdownCard`, `_legacy_message_useMarkdown`) in
+  favor of whole-file backups; the original config schema is preserved (#7)
+
 ## [0.1.3] - 2026-04-04
 
 ### Added
