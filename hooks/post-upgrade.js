@@ -15,6 +15,28 @@
 import fs from 'fs';
 import path from 'path';
 
+function timestampSuffix() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function backupConfigFile(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const backupPath = `${filePath}.backup.${timestampSuffix()}`;
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
+function atomicWriteJSON(filePath, obj) {
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(obj, null, 2));
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    throw err;
+  }
+}
+
 const HOME = process.env.HOME;
 const DATA_DIR = path.join(HOME, 'zylos/components/wecom');
 const configPath = path.join(DATA_DIR, 'config.json');
@@ -41,10 +63,9 @@ if (fs.existsSync(configPath)) {
 
     // Migration 2: Remove old webhook_port (replaced by internal_port)
     if (config.webhook_port !== undefined) {
-      config._legacy_webhook_port = config.webhook_port;
       delete config.webhook_port;
       migrated = true;
-      migrations.push('Removed webhook_port (WebSocket mode) — preserved as _legacy_webhook_port');
+      migrations.push('Removed webhook_port (WebSocket mode)');
     }
 
     // Migration 3: Ensure internal_port
@@ -56,18 +77,16 @@ if (fs.existsSync(configPath)) {
 
     // Migration 4: Remove old bot.agent_id (not used in WebSocket mode)
     if (config.bot) {
-      config._legacy_bot = config.bot;
       delete config.bot;
       migrated = true;
-      migrations.push('Removed bot config (WebSocket mode) — preserved as _legacy_bot');
+      migrations.push('Removed bot config (WebSocket mode)');
     }
 
     // Migration 5: Remove old proxy config (not used in WebSocket mode)
     if (config.proxy) {
-      config._legacy_proxy = config.proxy;
       delete config.proxy;
       migrated = true;
-      migrations.push('Removed proxy config (WebSocket mode) — preserved as _legacy_proxy');
+      migrations.push('Removed proxy config (WebSocket mode)');
     }
 
     // Migration 6: Ensure owner structure
@@ -122,16 +141,14 @@ if (fs.existsSync(configPath)) {
         migrations.push('Added message.welcome_text');
       }
       if (config.message.useMarkdownCard !== undefined) {
-        config._legacy_message_useMarkdownCard = config.message.useMarkdownCard;
         delete config.message.useMarkdownCard;
         migrated = true;
-        migrations.push('Removed deprecated message.useMarkdownCard — preserved as _legacy_message_useMarkdownCard');
+        migrations.push('Removed deprecated message.useMarkdownCard');
       }
       if (config.message.useMarkdown !== undefined) {
-        config._legacy_message_useMarkdown = config.message.useMarkdown;
         delete config.message.useMarkdown;
         migrated = true;
-        migrations.push('Removed deprecated message.useMarkdown — preserved as _legacy_message_useMarkdown');
+        migrations.push('Removed deprecated message.useMarkdown');
       }
     }
 
@@ -149,7 +166,9 @@ if (fs.existsSync(configPath)) {
 
     // Save if migrated
     if (migrated) {
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      const backupPath = backupConfigFile(configPath);
+      if (backupPath) console.log(`[post-upgrade] Backed up config to ${path.basename(backupPath)}`);
+      atomicWriteJSON(configPath, config);
       console.log('Config migrations applied:');
       migrations.forEach(m => console.log('  - ' + m));
     } else {
