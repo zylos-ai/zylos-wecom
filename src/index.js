@@ -22,6 +22,7 @@ import WebSocket from 'ws';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
+import { writeConnectionState, subscribeAckToState, lastWrittenState } from './lib/connection-state.js';
 import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
 import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
@@ -1055,6 +1056,7 @@ function connect() {
 
   const wsUrl = config.ws?.url || 'wss://openws.work.weixin.qq.com';
   console.log(`[wecom] ${localizedRuntimeMessage('runtime_connecting', { url: wsUrl })}`);
+  writeConnectionState('connecting');
 
   ws = new WebSocket(wsUrl);
 
@@ -1071,17 +1073,20 @@ function connect() {
 
       // Handle authentication response (match by saved subscribeReqId)
       if (cmd === 'aibot_subscribe' || (!cmd && frameReqId === subscribeReqId && !authenticated)) {
-        if (frame.errcode === 0 || frame.body?.code === 0) {
+        const ack = subscribeAckToState(frame);
+        if (ack.state === 'connected') {
           authenticated = true;
           subscribeReqId = null;
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
           console.log(`[wecom] ${t(runtimeLocale(), 'runtime_authenticated')}`);
+          writeConnectionState('connected');
           startHeartbeat();
           void refreshDocMcpConfig().catch(() => {});
         } else {
           console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
             frame: JSON.stringify(frame)
           })}`);
+          writeConnectionState('auth_failed', ack.detail);
           subscribeReqId = null;
           ws.close();
         }
@@ -1160,6 +1165,12 @@ function connect() {
     pendingRequestsByReqId.clear();
     const reasonStr = reason?.toString() || 'unknown';
     console.log(`[wecom] ${localizedRuntimeMessage('runtime_ws_closed', { code, reason: reasonStr })}`);
+    // Keep an auth_failed report authoritative: the ws.close() we issue right
+    // after a rejected subscribe ack lands here, and overwriting it with a
+    // generic `disconnected` would hide the real failure from openmax.
+    if (lastWrittenState() !== 'auth_failed') {
+      writeConnectionState('disconnected', `ws closed (code ${code})`);
+    }
     scheduleReconnect();
   });
 

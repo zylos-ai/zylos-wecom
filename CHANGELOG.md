@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.5] - 2026-07-10
+
+### Added
+- Report the bot's real connection state for zylos-openmax channel-connect
+  verification (zylos-openmax#34): atomically write
+  `~/zylos/components/wecom/runtime/connection-state.json`
+  (`{ state, detail?, updatedAt }` with state
+  `connected | auth_failed | connecting | disconnected`) on every
+  connection-state transition — `connecting` on each WS connect attempt,
+  `connected` on an accepted `aibot_subscribe` ack, `auth_failed` with
+  `code <errcode>: <errmsg>` on a rejected ack, and `disconnected` on WS
+  close (without clobbering a just-reported `auth_failed`). Writes are
+  best-effort and never break the bot; details never contain secrets.
+
 ## [0.1.4] - 2026-05-18
 
 ### Fixed
