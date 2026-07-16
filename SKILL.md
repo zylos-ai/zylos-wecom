@@ -86,7 +86,7 @@ $ADM remove-dm-allow <user_id>                # Remove user from dmAllowFrom
 
 # Group Management
 $ADM list-groups                              # List all configured groups
-$ADM add-group <chat_id> <name> [mode]        # Add group (mode: mention|smart)
+$ADM add-group <chat_id> <name>               # Add group
 $ADM remove-group <chat_id>                   # Remove a group
 $ADM set-group-policy <disabled|allowlist|open>  # Set group policy
 ```
@@ -123,8 +123,22 @@ WECOM_BOT_SECRET=your_bot_secret
 
 ### 3. Message Types
 
-Supported incoming: text, image, voice (auto-transcribed), video, file, mixed
 Supported outgoing: text, markdown
+
+Supported incoming (varies by chat type):
+
+| Type | DM | Group |
+|---|---|---|
+| text | Yes | Yes (@ only) |
+| mixed (text+image) | Yes | Yes (@ only) |
+| image (standalone) | Yes | Not pushed |
+| file | Yes | Not pushed |
+| voice (auto-transcribed) | Yes | Not pushed |
+| video | Yes | Not pushed |
+
+**Group chat limitations (WeCom platform-level):**
+- WeCom only pushes group messages where the bot is @-mentioned. Non-@ messages are never delivered.
+- Only `text` and `mixed` types are pushed in group chats. File, voice, video, and standalone image messages are silently dropped by the server.
 
 ## Owner
 

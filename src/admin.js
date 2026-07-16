@@ -47,43 +47,33 @@ const commands = {
     console.log(t(locale, 'admin_group_policy', { policy: config.groupPolicy || 'allowlist' }));
     console.log(t(locale, 'admin_configured_groups', { count: entries.length }));
     for (const [chatId, cfg] of entries) {
-      const mode = cfg.mode || 'mention';
       const allowFrom = cfg.allowFrom?.length ? ` allowFrom: [${cfg.allowFrom.join(', ')}]` : '';
       console.log(t(locale, 'admin_group_entry', {
         chatId,
         name: cfg.name || t(locale, 'admin_unnamed'),
-        mode,
         allowFrom
       }));
     }
   },
 
-  'add-group': (chatId, name, mode = 'mention') => {
+  'add-group': (chatId, name) => {
     if (!chatId || !name) {
       console.error(t(locale, 'admin_usage_add_group'));
-      process.exit(1);
-    }
-    if (!['mention', 'smart'].includes(mode)) {
-      console.error(t(locale, 'admin_mode_invalid'));
       process.exit(1);
     }
     const config = loadConfig();
     if (!config.groups) config.groups = {};
 
     if (config.groups[chatId]) {
-      console.log(t(locale, 'admin_group_exists', { chatId, mode }));
-      config.groups[chatId].mode = mode;
-      config.groups[chatId].requireMention = mode === 'mention';
+      console.log(t(locale, 'admin_group_exists', { chatId }));
     } else {
       config.groups[chatId] = {
         name,
-        mode,
-        requireMention: mode === 'mention',
         added_at: new Date().toISOString()
       };
     }
     saveConfigOrExit(config);
-    console.log(t(locale, 'admin_group_added', { chatId, name, mode }));
+    console.log(t(locale, 'admin_group_added', { chatId, name }));
     console.log(t(locale, 'admin_restart_hint'));
   },
 

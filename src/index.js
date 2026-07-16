@@ -564,10 +564,9 @@ function checkGroupPermission(chatId, userId, isMentioned) {
     case 'allowlist': {
       const groupConfig = config.groups?.[chatId];
       if (!groupConfig) return false;
-      // Check mode: "mention" requires @bot mention, "smart" receives all.
-      // Legacy configs may only have requireMention without mode.
-      const mode = groupConfig.mode || (groupConfig.requireMention === false ? 'smart' : 'mention');
-      if (mode === 'mention' && !isMentioned) return false;
+      // WeCom only pushes @-mentioned messages in groups (platform limitation),
+      // so all groups effectively require mention regardless of config.
+      if (!isMentioned) return false;
       // Check allowFrom sender restriction
       if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
         if (groupConfig.allowFrom.includes('*')) return true;
@@ -871,9 +870,10 @@ async function processCallback(frame) {
 
     // Permission check
     // For groups, detect if bot was @mentioned (used for mention mode filtering)
+    const mixedItems = body?.mixed?.msg_item || body?.mixed?.items;
     const isMentioned = isGroup && aibotId && (
       body?.text?.content?.includes(`@${aibotId}`)
-      || body?.mixed?.items?.some((item) => item?.msgtype === 'text' && item?.text?.content?.includes(`@${aibotId}`))
+      || mixedItems?.some((item) => item?.msgtype === 'text' && item?.text?.content?.includes(`@${aibotId}`))
     );
     if (isGroup) {
       if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
@@ -948,13 +948,27 @@ async function processCallback(frame) {
         }
         break;
       case 'mixed': {
-        // Mixed message: text + images
         const parts = [];
-        if (body?.mixed?.items) {
-          for (const item of body.mixed.items) {
-            if (item.msgtype === 'text') {
-              parts.push(item.text?.content || '');
-            } else if (item.msgtype === 'image') {
+        for (const item of (mixedItems || [])) {
+          if (item.msgtype === 'text') {
+            parts.push(item.text?.content || '');
+          } else if (item.msgtype === 'image') {
+            try {
+              const imgDl = await downloadIncomingMedia(
+                item.image?.url,
+                item.image?.aeskey,
+                item.image?.filename,
+                'wecom-image',
+                msgId
+              );
+              if (imgDl) {
+                if (!filePath) filePath = imgDl.path;
+                parts.push(`[image: ${imgDl.filename}]`);
+              } else {
+                parts.push('[image]');
+              }
+            } catch (err) {
+              console.error(`[wecom] Failed to download mixed image ${msgId}: ${err.message}`);
               parts.push('[image]');
             }
           }
@@ -965,6 +979,30 @@ async function processCallback(frame) {
       default:
         textContent = `[${msgType} message]`;
         break;
+    }
+
+    // Extract quoted/replied message if present
+    if (body?.quote) {
+      let quoteText = '';
+      switch (body.quote.msgtype) {
+        case 'text':
+          quoteText = body.quote.text?.content || '';
+          break;
+        case 'image':
+          quoteText = '[image]';
+          break;
+        case 'mixed': {
+          const qItems = body.quote.mixed?.msg_item || body.quote.mixed?.items || [];
+          quoteText = qItems.map(i => i.msgtype === 'text' ? (i.text?.content || '') : `[${i.msgtype}]`).join(' ');
+          break;
+        }
+        default:
+          quoteText = `[${body.quote.msgtype || 'unknown'} message]`;
+          break;
+      }
+      if (quoteText) {
+        textContent = `[引用: "${quoteText}"]\n${textContent}`;
+      }
     }
 
     if (!textContent) return;

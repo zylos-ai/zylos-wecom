@@ -33,9 +33,8 @@ export const DEFAULT_CONFIG = {
   // Group policy: 'open' (all groups), 'allowlist' (only configured groups), 'disabled' (no groups)
   groupPolicy: 'allowlist',
   // Per-group configuration map
-  // Format: { "chatId": { name, mode, allowFrom } }
-  // mode: "mention" (respond to @mentions) or "smart" (receive all messages)
-  // Legacy config field "requireMention" is still supported for backward compatibility.
+  // Format: { "chatId": { name, allowFrom } }
+  // WeCom only pushes @-mentioned messages in groups (platform limitation).
   groups: {},
   // Message settings
   message: {
