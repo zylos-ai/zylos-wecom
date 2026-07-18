@@ -65,15 +65,17 @@ const commands = {
     if (!config.groups) config.groups = {};
 
     if (config.groups[chatId]) {
-      console.log(t(locale, 'admin_group_exists', { chatId }));
+      config.groups[chatId].name = name;
+      saveConfigOrExit(config);
+      console.log(t(locale, 'admin_group_updated', { chatId, name }));
     } else {
       config.groups[chatId] = {
         name,
         added_at: new Date().toISOString()
       };
+      saveConfigOrExit(config);
+      console.log(t(locale, 'admin_group_added', { chatId, name }));
     }
-    saveConfigOrExit(config);
-    console.log(t(locale, 'admin_group_added', { chatId, name }));
     console.log(t(locale, 'admin_restart_hint'));
   },
 

@@ -487,7 +487,7 @@ function escapeXml(value) {
     .replace(/"/g, '&quot;');
 }
 
-function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null) {
+function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null, quotedContent = '') {
   const prefix = chatType === 'group'
     ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
     : '[WeCom DM]';
@@ -498,6 +498,10 @@ function formatC4Message(chatType, senderName, text, contextMessages = [], media
       .map((message) => `[${escapeXml(message.userName || message.userId || 'unknown')}]: ${escapeXml(message.text)}`)
       .join('\n');
     parts.push(`<group-context>\n${contextLines}\n</group-context>\n\n`);
+  }
+
+  if (quotedContent) {
+    parts.push(`<replying-to>\n${escapeXml(quotedContent)}\n</replying-to>\n\n`);
   }
 
   parts.push(`<current-message>\n${escapeXml(text)}\n</current-message>`);
@@ -981,31 +985,28 @@ async function processCallback(frame) {
         break;
     }
 
-    // Extract quoted/replied message if present
+    // Extract quoted/replied message if present (forwarded as a <replying-to> block)
+    let quotedContent = '';
     if (body?.quote) {
-      let quoteText = '';
       switch (body.quote.msgtype) {
         case 'text':
-          quoteText = body.quote.text?.content || '';
+          quotedContent = body.quote.text?.content || '';
           break;
         case 'image':
-          quoteText = '[image]';
+          quotedContent = '[image]';
           break;
         case 'mixed': {
           const qItems = body.quote.mixed?.msg_item || body.quote.mixed?.items || [];
-          quoteText = qItems.map(i => i.msgtype === 'text' ? (i.text?.content || '') : `[${i.msgtype}]`).join(' ');
+          quotedContent = qItems.map(i => i.msgtype === 'text' ? (i.text?.content || '') : `[${i.msgtype}]`).join(' ');
           break;
         }
         default:
-          quoteText = `[${body.quote.msgtype || 'unknown'} message]`;
+          quotedContent = `[${body.quote.msgtype || 'unknown'} message]`;
           break;
-      }
-      if (quoteText) {
-        textContent = `[引用: "${quoteText}"]\n${textContent}`;
       }
     }
 
-    if (!textContent) return;
+    if (!textContent && !quotedContent) return;
 
     // Strip @bot mention from group messages (only strip the bot's own mention)
     if (isGroup && aibotId) {
@@ -1017,19 +1018,19 @@ async function processCallback(frame) {
       msgId,
       userId: fromUser,
       userName: senderName,
-      text: textContent,
+      text: textContent || `[replying to: "${quotedContent}"]`,
       timestamp: new Date().toISOString()
     });
 
     if (isGroup) {
       const groupName = config.groups?.[chatId]?.name || chatId;
       const context = getContextMessages(chatId, msgId);
-      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName);
+      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName, quotedContent);
       const endpoint = `${chatId}|type:group|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     } else {
       const context = getContextMessages(fromUser, msgId);
-      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath);
+      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath, null, quotedContent);
       const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     }
