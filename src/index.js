@@ -70,6 +70,7 @@ fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
 // State files
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
+const BOT_NAME_CACHE_PATH = path.join(DATA_DIR, 'bot-name.json');
 
 if (!config.enabled) {
   console.log(`[wecom] ${localizedRuntimeMessage('runtime_disabled_exit')}`);
@@ -476,8 +477,20 @@ function recordHistoryEntry(chatId, entry) {
 // messages that mention the bot — so a message containing exactly one
 // distinct "@name" token necessarily names the bot, wherever the mention
 // sits in the text. config.message.bot_name overrides the learned value;
-// last resort is the literal 'bot'.
+// last resort is the literal 'bot'. Persisted to bot-name.json so a
+// restart does not have to wait for the next single-mention message.
 let learnedBotName = '';
+try {
+  if (fs.existsSync(BOT_NAME_CACHE_PATH)) {
+    const cached = JSON.parse(fs.readFileSync(BOT_NAME_CACHE_PATH, 'utf8'));
+    if (typeof cached?.name === 'string' && cached.name) {
+      learnedBotName = cached.name;
+      console.log(`[wecom] Loaded bot display name from cache: ${learnedBotName}`);
+    }
+  }
+} catch (err) {
+  console.log(`[wecom] Failed to load bot-name cache: ${err.message}`);
+}
 
 function learnBotNameFromMention(text) {
   if (learnedBotName) return;
@@ -499,6 +512,11 @@ function learnBotNameFromMention(text) {
   if (name) {
     learnedBotName = name;
     console.log(`[wecom] Learned bot display name from mention: ${name}`);
+    try {
+      fs.writeFileSync(BOT_NAME_CACHE_PATH, JSON.stringify({ name, learnedAt: new Date().toISOString() }) + '\n');
+    } catch (err) {
+      console.log(`[wecom] Failed to persist bot-name cache: ${err.message}`);
+    }
   }
 }
 
