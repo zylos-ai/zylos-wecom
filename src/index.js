@@ -493,14 +493,14 @@ try {
 }
 
 function learnBotNameFromMention(text) {
-  if (learnedBotName) return;
   const raw = String(text || '');
   // Collect distinct @tokens (terminated by whitespace \u2014 \s covers U+2005,
   // the WeChat-family mention terminator \u2014 or another @). Exactly one
   // distinct token = it names the bot; multi-mention messages are skipped
-  // as ambiguous until a single-mention one arrives. Names containing
-  // spaces get truncated at the first space \u2014 set config.message.bot_name
-  // to override in that case.
+  // as ambiguous. Runs on every group message (not learn-once) so a rename
+  // of the bot in WeCom is picked up from the next single-mention message.
+  // Names containing spaces get truncated at the first space \u2014 set
+  // config.message.bot_name to override in that case.
   const tokens = new Set();
   const tokenRe = /@([^\s@]{1,64})/g;
   let match;
@@ -509,14 +509,14 @@ function learnBotNameFromMention(text) {
   }
   if (tokens.size !== 1) return;
   const name = [...tokens][0].trim();
-  if (name) {
-    learnedBotName = name;
-    console.log(`[wecom] Learned bot display name from mention: ${name}`);
-    try {
-      fs.writeFileSync(BOT_NAME_CACHE_PATH, JSON.stringify({ name, learnedAt: new Date().toISOString() }) + '\n');
-    } catch (err) {
-      console.log(`[wecom] Failed to persist bot-name cache: ${err.message}`);
-    }
+  if (!name || name === learnedBotName) return;
+  const renamed = Boolean(learnedBotName);
+  learnedBotName = name;
+  console.log(`[wecom] ${renamed ? 'Updated' : 'Learned'} bot display name from mention: ${name}`);
+  try {
+    fs.writeFileSync(BOT_NAME_CACHE_PATH, JSON.stringify({ name, learnedAt: new Date().toISOString() }) + '\n');
+  } catch (err) {
+    console.log(`[wecom] Failed to persist bot-name cache: ${err.message}`);
   }
 }
 

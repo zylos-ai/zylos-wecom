@@ -166,8 +166,10 @@ resolved in this order:
 2. Name auto-learned from incoming group messages: since WeCom only pushes
    messages that mention the bot, a message containing exactly one distinct
    `@name` token necessarily names the bot, wherever the mention sits.
-   Learned once and persisted to `bot-name.json` in the data directory, so
-   it survives restarts; multi-mention messages are skipped as ambiguous.
+   Persisted to `bot-name.json` in the data directory (survives restarts)
+   and re-evaluated on every group message, so renaming the bot in WeCom is
+   picked up from the next single-mention message; multi-mention messages
+   are skipped as ambiguous.
 3. Literal `bot`
 
 Set `message.bot_name` if auto-learning cannot apply (e.g. the bot's display
