@@ -487,20 +487,6 @@ function escapeXml(value) {
     .replace(/"/g, '&quot;');
 }
 
-/**
- * Strip the leading @-mention from group message text.
- * WeCom inserts "@<bot display name>" followed by a double space before the
- * user's text. Display names may contain single spaces, so cut at the double
- * space when present; otherwise fall back to removing a single "@word".
- */
-function stripLeadingMention(text) {
-  const trimmed = text.trimStart();
-  if (!trimmed.startsWith('@')) return text.trim();
-  const sep = trimmed.indexOf('  ');
-  if (sep !== -1) return trimmed.slice(sep + 2).trim();
-  return trimmed.replace(/^@\S+\s*/, '').trim();
-}
-
 function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null, quotedContent = '') {
   const prefix = chatType === 'group'
     ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
@@ -1016,15 +1002,13 @@ async function processCallback(frame) {
 
     if (!textContent && !quotedContent) return;
 
-    // Strip the leading @bot mention from group messages. WeCom renders the
-    // mention as "@<bot display name>" plain text (never the aibotid) with a
-    // double-space separator after it; mid-text mentions are left in place so
-    // the agent still sees who was addressed. A mention-only message (bare
-    // "@Bot", often paired with a quote) keeps the mention text instead of
-    // being emptied — telegram renders a lone mention the same way.
-    if (isGroup) {
-      textContent = stripLeadingMention(textContent) || textContent.trim();
-    }
+    // Mentions are forwarded verbatim ("@<display name>" plain text), same as
+    // the lark and telegram components. Stripping is not attempted: the bot's
+    // display name is not available in this protocol mode (body.from has no
+    // name, there is no bot-name field), so any heuristic risks eating a
+    // leading mention of someone else, and the prefix carries real
+    // information (who was addressed).
+    textContent = textContent.trim();
 
     // Record to history
     recordHistoryEntry(isGroup ? chatId : fromUser, {
