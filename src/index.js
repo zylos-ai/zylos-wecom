@@ -1019,9 +1019,11 @@ async function processCallback(frame) {
     // Strip the leading @bot mention from group messages. WeCom renders the
     // mention as "@<bot display name>" plain text (never the aibotid) with a
     // double-space separator after it; mid-text mentions are left in place so
-    // the agent still sees who was addressed.
+    // the agent still sees who was addressed. A mention-only message (bare
+    // "@Bot", often paired with a quote) keeps the mention text instead of
+    // being emptied — telegram renders a lone mention the same way.
     if (isGroup) {
-      textContent = stripLeadingMention(textContent);
+      textContent = stripLeadingMention(textContent) || textContent.trim();
     }
 
     // Record to history
