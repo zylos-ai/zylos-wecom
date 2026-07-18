@@ -478,13 +478,15 @@ function getContextMessages(chatId, currentMsgId) {
   return filtered.slice(-count);
 }
 
+// Escape only what protects the C4 tag structure (<current-message> etc.)
+// from being broken or spoofed by user text. Quotes are element content
+// here, not attribute values — escaping them adds no protection and makes
+// the agent-visible text noisy (&quot;...&quot;).
 function escapeXml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/'/g, '&apos;')
-    .replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;');
 }
 
 function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null, quotedContent = '') {
