@@ -65,8 +65,10 @@ console.log(`[wecom] ${localizedRuntimeMessage('runtime_data_dir', { dir: DATA_D
 // Ensure directories
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const HISTORY_DIR = path.join(DATA_DIR, 'history');
 fs.mkdirSync(LOGS_DIR, { recursive: true });
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
+fs.mkdirSync(HISTORY_DIR, { recursive: true });
 
 // State files
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
@@ -450,11 +452,18 @@ function sleep(ms) {
 }
 
 // ============================================================
-// In-memory chat history for context
+// Chat history for context: in-memory + per-chat JSONL dual-write
+// (telegram pattern — memory is the hot path, the JSONL file is an
+// append-only audit log whose tail is replayed after a restart)
 // ============================================================
 const DEFAULT_HISTORY_LIMIT = 5;
 const DEFAULT_CONTEXT_IDLE_MINUTES = 30;
 const chatHistories = new Map();
+const replayedChats = new Set();
+
+function historyLogFile(chatId) {
+  return path.join(HISTORY_DIR, `${String(chatId).replace(/[^A-Za-z0-9_-]/g, '_')}.jsonl`);
+}
 
 function recordHistoryEntry(chatId, entry) {
   if (!chatHistories.has(chatId)) {
@@ -469,6 +478,68 @@ function recordHistoryEntry(chatId, entry) {
   if (history.length > limit * 2) {
     chatHistories.set(chatId, history.slice(-limit));
   }
+}
+
+// On first access after a restart, repopulate memory from the tail of the
+// chat's JSONL file (only the tail is read so large logs stay cheap).
+function ensureHistoryReplay(chatId) {
+  chatId = String(chatId);
+  if (replayedChats.has(chatId)) return;
+  const logFile = historyLogFile(chatId);
+  if (!fs.existsSync(logFile)) {
+    replayedChats.add(chatId);
+    return;
+  }
+  const limit = config.message?.context_messages || DEFAULT_HISTORY_LIMIT;
+  try {
+    const stat = fs.statSync(logFile);
+    const BYTES_PER_ENTRY = 512;
+    const readSize = Math.min(stat.size, limit * BYTES_PER_ENTRY * 2);
+    let content;
+    if (readSize < stat.size) {
+      const buf = Buffer.alloc(readSize);
+      const fd = fs.openSync(logFile, 'r');
+      try {
+        fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+      } finally {
+        fs.closeSync(fd);
+      }
+      // Drop the first (potentially partial) line
+      const text = buf.toString('utf8');
+      const firstNewline = text.indexOf('\n');
+      content = firstNewline !== -1 ? text.slice(firstNewline + 1) : text;
+    } else {
+      content = fs.readFileSync(logFile, 'utf8');
+    }
+    const tail = content.trim().split('\n').filter(Boolean).slice(-limit);
+    for (const line of tail) {
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      recordHistoryEntry(chatId, entry);
+    }
+    replayedChats.add(chatId);
+    if (tail.length > 0) {
+      console.log(`[wecom] Replayed ${tail.length} history entries for ${chatId}`);
+    }
+  } catch (err) {
+    // Not marked as replayed — retried on the next message
+    console.error(`[wecom] History replay failed for ${chatId}: ${err.message}`);
+  }
+}
+
+function logAndRecordHistory(chatId, entry) {
+  chatId = String(chatId);
+  ensureHistoryReplay(chatId);
+  try {
+    fs.appendFileSync(historyLogFile(chatId), JSON.stringify(entry) + '\n');
+  } catch (err) {
+    console.error(`[wecom] History write failed for ${chatId}: ${err.message}`);
+  }
+  recordHistoryEntry(chatId, entry);
 }
 
 // The bot's display name, used to label its own replies inside
@@ -1095,8 +1166,8 @@ async function processCallback(frame) {
       learnBotNameFromMention(textContent);
     }
 
-    // Record to history
-    recordHistoryEntry(isGroup ? chatId : fromUser, {
+    // Record to history (memory + JSONL)
+    logAndRecordHistory(isGroup ? chatId : fromUser, {
       msgId,
       userId: fromUser,
       userName: senderName,
@@ -1387,7 +1458,7 @@ async function handleInternalRequest(url, data, res) {
       return;
     }
 
-    recordHistoryEntry(String(chatId), {
+    logAndRecordHistory(String(chatId), {
       msgId: `out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       userId: 'bot',
       userName: botDisplayName(),

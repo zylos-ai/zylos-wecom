@@ -149,7 +149,9 @@ bot's own replies — it is the bot's conversation thread, **not** the full
 group discussion. Its value is continuity: the agent sees what was already
 asked and answered in that group instead of treating every mention as a
 cold start. History is kept in memory (last `message.context_messages`
-entries per chat) and does not survive a service restart.
+entries per chat) and dual-written to per-chat JSONL files under
+`history/` in the data directory; after a restart the tail of the file
+is replayed on first access, so context survives service restarts.
 
 Since every context entry was already forwarded to the agent when it
 arrived, attaching it to every message would be pure duplication during a
