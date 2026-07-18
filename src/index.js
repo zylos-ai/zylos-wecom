@@ -472,34 +472,33 @@ function recordHistoryEntry(chatId, entry) {
 
 // The bot's display name, used to label its own replies inside
 // <group-context>. The protocol never provides it (body.from carries userid
-// only, and there is no bot-name field), but every group message the server
-// pushes starts with the "@<bot display name>" mention terminated by a double
-// space — learn the name once from that prefix. config.message.bot_name
-// overrides the learned value; last resort is the literal 'bot'.
+// only, and there is no bot-name field), but the server only pushes group
+// messages that mention the bot — so a message containing exactly one
+// distinct "@name" token necessarily names the bot, wherever the mention
+// sits in the text. config.message.bot_name overrides the learned value;
+// last resort is the literal 'bot'.
 let learnedBotName = '';
-let mentionLearnDebugLogged = false;
 
 function learnBotNameFromMention(text) {
   if (learnedBotName) return;
   const raw = String(text || '');
-  if (!raw.startsWith('@')) return;
-  // WeChat-family clients terminate a mention with U+2005 (four-per-em
-  // space). Prefer that; otherwise fall back to the first whitespace run,
-  // which truncates display names containing spaces -- set
-  // config.message.bot_name to override in that case.
-  const match = raw.match(/^@(.{1,64}?)\u2005/) || raw.match(/^@(\S{1,64})(?=\s)/);
-  if (!match) {
-    if (!mentionLearnDebugLogged) {
-      mentionLearnDebugLogged = true;
-      const codes = [...raw.slice(0, 24)].map((c) => c.codePointAt(0).toString(16)).join(' ');
-      console.log(`[wecom] Bot-name learn: no known separator after mention; first codepoints: ${codes}`);
-    }
-    return;
+  // Collect distinct @tokens (terminated by whitespace \u2014 \s covers U+2005,
+  // the WeChat-family mention terminator \u2014 or another @). Exactly one
+  // distinct token = it names the bot; multi-mention messages are skipped
+  // as ambiguous until a single-mention one arrives. Names containing
+  // spaces get truncated at the first space \u2014 set config.message.bot_name
+  // to override in that case.
+  const tokens = new Set();
+  const tokenRe = /@([^\s@]{1,64})/g;
+  let match;
+  while ((match = tokenRe.exec(raw)) !== null) {
+    tokens.add(match[1]);
   }
-  const name = match[1].trim();
+  if (tokens.size !== 1) return;
+  const name = [...tokens][0].trim();
   if (name) {
     learnedBotName = name;
-    console.log(`[wecom] Learned bot display name from mention prefix: ${name}`);
+    console.log(`[wecom] Learned bot display name from mention: ${name}`);
   }
 }
 

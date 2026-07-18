@@ -163,12 +163,15 @@ The bot's own replies in the context are labeled with its display name,
 resolved in this order:
 
 1. `message.bot_name` in config.json (explicit override)
-2. Name auto-learned from the `@<bot name>` mention prefix that starts every
-   incoming group message (learned once per service run)
+2. Name auto-learned from incoming group messages: since WeCom only pushes
+   messages that mention the bot, a message containing exactly one distinct
+   `@name` token necessarily names the bot, wherever the mention sits.
+   Learned once per service run; multi-mention messages are skipped as
+   ambiguous.
 3. Literal `bot`
 
-Set `message.bot_name` if auto-learning picks up a wrong name (e.g. a first
-message that opens by mentioning someone other than the bot).
+Set `message.bot_name` if auto-learning cannot apply (e.g. the bot's display
+name contains spaces, which truncates at the first space).
 
 ## Owner
 

@@ -47,8 +47,8 @@ export const DEFAULT_CONFIG = {
     // attach (legacy behavior).
     context_idle_minutes: 30,
     // Label for the bot's own replies inside <group-context>. Empty = auto-learn
-    // from the "@<bot name>" mention prefix of incoming group messages (the
-    // protocol never provides the bot's name directly); final fallback: 'bot'.
+    // from the "@<bot name>" mention in incoming group messages (the protocol
+    // never provides the bot's name directly); final fallback: 'bot'.
     bot_name: '',
     locale: 'zh-CN',
     welcome_text: '',  // legacy fallback; empty = no auto-reply; non-empty = auto-reply
