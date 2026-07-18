@@ -477,14 +477,26 @@ function recordHistoryEntry(chatId, entry) {
 // space — learn the name once from that prefix. config.message.bot_name
 // overrides the learned value; last resort is the literal 'bot'.
 let learnedBotName = '';
+let mentionLearnDebugLogged = false;
 
 function learnBotNameFromMention(text) {
   if (learnedBotName) return;
   const raw = String(text || '');
   if (!raw.startsWith('@')) return;
-  const sep = raw.indexOf('  ');
-  if (sep <= 1 || sep > 65) return; // no double-space separator, or name > 64 chars
-  const name = raw.slice(1, sep).trim();
+  // WeChat-family clients terminate a mention with U+2005 (four-per-em
+  // space). Prefer that; otherwise fall back to the first whitespace run,
+  // which truncates display names containing spaces -- set
+  // config.message.bot_name to override in that case.
+  const match = raw.match(/^@(.{1,64}?)\u2005/) || raw.match(/^@(\S{1,64})(?=\s)/);
+  if (!match) {
+    if (!mentionLearnDebugLogged) {
+      mentionLearnDebugLogged = true;
+      const codes = [...raw.slice(0, 24)].map((c) => c.codePointAt(0).toString(16)).join(' ');
+      console.log(`[wecom] Bot-name learn: no known separator after mention; first codepoints: ${codes}`);
+    }
+    return;
+  }
+  const name = match[1].trim();
   if (name) {
     learnedBotName = name;
     console.log(`[wecom] Learned bot display name from mention prefix: ${name}`);
@@ -533,11 +545,21 @@ function formatC4Message(chatType, senderName, text, contextMessages = [], media
   const prefix = chatType === 'group'
     ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
     : '[WeCom DM]';
-  const parts = [`${prefix} ${escapeXml(senderName)} said: `];
+  // The sender belongs to <current-message>, not the envelope: with the
+  // context block in between, "X said: <group-context>..." read as if X had
+  // said the context.
+  const parts = [`${prefix} `];
 
   if (contextMessages.length > 0) {
     const contextLines = contextMessages
-      .map((message) => `[${escapeXml(message.userName || message.userId || 'unknown')}]: ${escapeXml(message.text)}`)
+      .map((message) => {
+        // Bot entries resolve their label at read time, so a name learned
+        // (or configured) after the entry was recorded still applies.
+        const label = message.userId === 'bot'
+          ? botDisplayName()
+          : (message.userName || message.userId || 'unknown');
+        return `[${escapeXml(label)}]: ${escapeXml(message.text)}`;
+      })
       .join('\n');
     parts.push(`<group-context>\n${contextLines}\n</group-context>\n\n`);
   }
@@ -546,7 +568,7 @@ function formatC4Message(chatType, senderName, text, contextMessages = [], media
     parts.push(`<replying-to>\n${escapeXml(quotedContent)}\n</replying-to>\n\n`);
   }
 
-  parts.push(`<current-message>\n${escapeXml(text)}\n</current-message>`);
+  parts.push(`<current-message>\n${escapeXml(senderName)} said: ${escapeXml(text)}\n</current-message>`);
 
   let message = parts.join('');
   if (mediaPath) {
