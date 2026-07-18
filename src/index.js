@@ -469,6 +469,31 @@ function recordHistoryEntry(chatId, entry) {
   }
 }
 
+// The bot's display name, used to label its own replies inside
+// <group-context>. The protocol never provides it (body.from carries userid
+// only, and there is no bot-name field), but every group message the server
+// pushes starts with the "@<bot display name>" mention terminated by a double
+// space — learn the name once from that prefix. config.message.bot_name
+// overrides the learned value; last resort is the literal 'bot'.
+let learnedBotName = '';
+
+function learnBotNameFromMention(text) {
+  if (learnedBotName) return;
+  const raw = String(text || '');
+  if (!raw.startsWith('@')) return;
+  const sep = raw.indexOf('  ');
+  if (sep <= 1 || sep > 65) return; // no double-space separator, or name > 64 chars
+  const name = raw.slice(1, sep).trim();
+  if (name) {
+    learnedBotName = name;
+    console.log(`[wecom] Learned bot display name from mention prefix: ${name}`);
+  }
+}
+
+function botDisplayName() {
+  return config.message?.bot_name || learnedBotName || 'bot';
+}
+
 function getContextMessages(chatId, currentMsgId) {
   const history = chatHistories.get(chatId);
   if (!history || history.length === 0) return [];
@@ -1012,6 +1037,10 @@ async function processCallback(frame) {
     // information (who was addressed).
     textContent = textContent.trim();
 
+    if (isGroup) {
+      learnBotNameFromMention(textContent);
+    }
+
     // Record to history
     recordHistoryEntry(isGroup ? chatId : fromUser, {
       msgId,
@@ -1307,7 +1336,7 @@ async function handleInternalRequest(url, data, res) {
     recordHistoryEntry(String(chatId), {
       msgId: `out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       userId: 'bot',
-      userName: 'bot',
+      userName: botDisplayName(),
       text: String(text).slice(0, 4000),
       timestamp: new Date().toISOString()
     });

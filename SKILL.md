@@ -140,6 +140,28 @@ Supported incoming (varies by chat type):
 - WeCom only pushes group messages where the bot is @-mentioned. Non-@ messages are never delivered.
 - Only `text` and `mixed` types are pushed in group chats. File, voice, video, and standalone image messages are silently dropped by the server.
 
+### 4. Group Context
+
+Group messages forwarded to the agent include a `<group-context>` block with
+recent history. Because WeCom only delivers @-mentions (see limitations
+above), this context can only ever contain earlier @bot messages and the
+bot's own replies — it is the bot's conversation thread, **not** the full
+group discussion. Its value is continuity: the agent sees what was already
+asked and answered in that group instead of treating every mention as a
+cold start. History is kept in memory (last `message.context_messages`
+entries per chat) and does not survive a service restart.
+
+The bot's own replies in the context are labeled with its display name,
+resolved in this order:
+
+1. `message.bot_name` in config.json (explicit override)
+2. Name auto-learned from the `@<bot name>` mention prefix that starts every
+   incoming group message (learned once per service run)
+3. Literal `bot`
+
+Set `message.bot_name` if auto-learning picks up a wrong name (e.g. a first
+message that opens by mentioning someone other than the bot).
+
 ## Owner
 
 First user to send a private message becomes the owner (primary partner).

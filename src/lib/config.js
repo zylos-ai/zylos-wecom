@@ -39,6 +39,10 @@ export const DEFAULT_CONFIG = {
   // Message settings
   message: {
     context_messages: 10,
+    // Label for the bot's own replies inside <group-context>. Empty = auto-learn
+    // from the "@<bot name>" mention prefix of incoming group messages (the
+    // protocol never provides the bot's name directly); final fallback: 'bot'.
+    bot_name: '',
     locale: 'zh-CN',
     welcome_text: '',  // legacy fallback; empty = no auto-reply; non-empty = auto-reply
     welcome_texts: {}  // locale-aware welcome messages, keyed by locale (e.g. zh-CN, en-US)
