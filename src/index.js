@@ -487,6 +487,20 @@ function escapeXml(value) {
     .replace(/"/g, '&quot;');
 }
 
+/**
+ * Strip the leading @-mention from group message text.
+ * WeCom inserts "@<bot display name>" followed by a double space before the
+ * user's text. Display names may contain single spaces, so cut at the double
+ * space when present; otherwise fall back to removing a single "@word".
+ */
+function stripLeadingMention(text) {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith('@')) return text.trim();
+  const sep = trimmed.indexOf('  ');
+  if (sep !== -1) return trimmed.slice(sep + 2).trim();
+  return trimmed.replace(/^@\S+\s*/, '').trim();
+}
+
 function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null, quotedContent = '') {
   const prefix = chatType === 'group'
     ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
@@ -559,7 +573,7 @@ function checkDmPermission(userId) {
   }
 }
 
-function checkGroupPermission(chatId, userId, isMentioned) {
+function checkGroupPermission(chatId, userId) {
   const policy = config.groupPolicy || 'allowlist';
   if (isOwner(userId)) return true;
   switch (policy) {
@@ -568,9 +582,9 @@ function checkGroupPermission(chatId, userId, isMentioned) {
     case 'allowlist': {
       const groupConfig = config.groups?.[chatId];
       if (!groupConfig) return false;
-      // WeCom only pushes @-mentioned messages in groups (platform limitation),
-      // so all groups effectively require mention regardless of config.
-      if (!isMentioned) return false;
+      // No mention check: WeCom only delivers group callbacks when the bot is
+      // @-mentioned (developer.work.weixin.qq.com/document/path/100719), so a
+      // group callback arriving at all implies the bot was mentioned.
       // Check allowFrom sender restriction
       if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
         if (groupConfig.allowFrom.includes('*')) return true;
@@ -836,7 +850,6 @@ async function processCallback(frame) {
   if (cmd === 'aibot_msg_callback') {
     const reqId = headers?.req_id;
     const msgId = body?.msgid;
-    const aibotId = body?.aibotid;
     const chatId = body?.chatid;
     const chatType = body?.chattype; // 'single' or 'group'
     const fromUser = body?.from?.userid;
@@ -873,14 +886,9 @@ async function processCallback(frame) {
     }
 
     // Permission check
-    // For groups, detect if bot was @mentioned (used for mention mode filtering)
     const mixedItems = body?.mixed?.msg_item || body?.mixed?.items;
-    const isMentioned = isGroup && aibotId && (
-      body?.text?.content?.includes(`@${aibotId}`)
-      || mixedItems?.some((item) => item?.msgtype === 'text' && item?.text?.content?.includes(`@${aibotId}`))
-    );
     if (isGroup) {
-      if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
+      if (!checkGroupPermission(chatId, fromUser)) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
         return;
       }
@@ -1008,9 +1016,12 @@ async function processCallback(frame) {
 
     if (!textContent && !quotedContent) return;
 
-    // Strip @bot mention from group messages (only strip the bot's own mention)
-    if (isGroup && aibotId) {
-      textContent = textContent.replace(new RegExp(`@${aibotId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'g'), '').trim();
+    // Strip the leading @bot mention from group messages. WeCom renders the
+    // mention as "@<bot display name>" plain text (never the aibotid) with a
+    // double-space separator after it; mid-text mentions are left in place so
+    // the agent still sees who was addressed.
+    if (isGroup) {
+      textContent = stripLeadingMention(textContent);
     }
 
     // Record to history
