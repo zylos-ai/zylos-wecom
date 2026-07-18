@@ -123,7 +123,23 @@ WECOM_BOT_SECRET=your_bot_secret
 
 ### 3. Message Types
 
-Supported outgoing: text, markdown
+Supported outgoing: text, markdown, image, file
+
+**Sending media:** prefix the outbound message with the C4 media convention
+(same as telegram):
+
+```
+[MEDIA:image]/absolute/path/to/picture.png
+[MEDIA:file]/absolute/path/to/report.pdf
+```
+
+Media is uploaded over the long connection in chunks (≤512KB × ≤100 chunks)
+and sent by `media_id`. Size caps: image 10MB, file 20MB (voice 2MB, video
+10MB at the protocol level; not yet exposed via send.js). The reply path
+(`aibot_respond_msg`, within 24h of a callback) officially supports media;
+the proactive path (`aibot_send_msg`) is documented inconsistently and needs
+live verification. On upload/send failure the send fails loudly (exit 1) —
+there is no silent text fallback.
 
 Supported incoming (varies by chat type):
 

@@ -899,6 +899,107 @@ async function refreshDocMcpConfig() {
   return refreshed;
 }
 
+// ============================================================
+// Outbound media: chunked upload over the long connection (issue #14)
+// Protocol: aibot_upload_media_init/chunk/finish, then msgtype image/file/
+// voice/video with the returned media_id. Chunks ≤512KB pre-base64, ≤100
+// chunks, upload session valid 30 min, media_id valid 3 days.
+// ============================================================
+const MEDIA_CHUNK_BYTES = 512 * 1024;
+const MEDIA_MAX_CHUNKS = 100;
+const MEDIA_SIZE_LIMITS_MB = { image: 10, voice: 2, video: 10, file: 20 };
+const MEDIA_UPLOAD_TIMEOUT_MS = 30000;
+
+function mediaResponseError(frame, stage) {
+  if (typeof frame?.errcode === 'number' && frame.errcode !== 0) {
+    return `${stage} failed: ${frame.errcode} ${frame.errmsg || ''}`.trim();
+  }
+  if (typeof frame?.body?.code === 'number' && frame.body.code !== 0) {
+    return `${stage} failed: ${frame.body.code} ${frame.body.msg || ''}`.trim();
+  }
+  return null;
+}
+
+async function uploadMedia(filePath, type) {
+  const stat = fs.statSync(filePath);
+  const limitMb = MEDIA_SIZE_LIMITS_MB[type] || MEDIA_SIZE_LIMITS_MB.file;
+  if (stat.size > limitMb * 1024 * 1024) {
+    throw new Error(`${path.basename(filePath)} exceeds the ${limitMb}MB ${type} limit`);
+  }
+  const data = fs.readFileSync(filePath);
+  const totalChunks = Math.max(1, Math.ceil(data.length / MEDIA_CHUNK_BYTES));
+  if (totalChunks > MEDIA_MAX_CHUNKS) {
+    throw new Error(`${path.basename(filePath)} needs ${totalChunks} chunks (max ${MEDIA_MAX_CHUNKS})`);
+  }
+
+  const initFrame = await wsRequest('aibot_upload_media_init', {
+    type,
+    filename: path.basename(filePath),
+    total_size: data.length,
+    total_chunks: totalChunks,
+    md5: crypto.createHash('md5').update(data).digest('hex')
+  }, { timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS });
+  const initError = mediaResponseError(initFrame, 'media upload init');
+  if (initError) throw new Error(initError);
+  const uploadId = initFrame?.body?.upload_id;
+  if (!uploadId) throw new Error('media upload init returned no upload_id');
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = data.subarray(i * MEDIA_CHUNK_BYTES, (i + 1) * MEDIA_CHUNK_BYTES);
+    const chunkFrame = await wsRequest('aibot_upload_media_chunk', {
+      upload_id: uploadId,
+      chunk_index: i,
+      base64_data: chunk.toString('base64')
+    }, { timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS });
+    const chunkError = mediaResponseError(chunkFrame, `media upload chunk ${i}`);
+    if (chunkError) throw new Error(chunkError);
+  }
+
+  const finishFrame = await wsRequest('aibot_upload_media_finish', {
+    upload_id: uploadId
+  }, { timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS });
+  const finishError = mediaResponseError(finishFrame, 'media upload finish');
+  if (finishError) throw new Error(finishError);
+  const mediaId = finishFrame?.body?.media_id;
+  if (!mediaId) throw new Error('media upload finish returned no media_id');
+  return mediaId;
+}
+
+/**
+ * Send a media message: upload, then reply (high confidence per docs) with
+ * proactive aibot_send_msg as the fallback path. No silent text fallback —
+ * a failure is returned to the caller so the agent knows delivery failed.
+ */
+async function sendMediaMessage(target, msgId, filePath, type) {
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `File not found: ${filePath}` };
+  }
+  let mediaId;
+  try {
+    mediaId = await uploadMedia(filePath, type);
+  } catch (err) {
+    console.error(`[wecom] Media upload failed for ${filePath}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+
+  const payload = { [type]: { media_id: mediaId } };
+  const req = msgId ? getRequest(msgId) : null;
+  if (req) {
+    console.log(`[wecom] Replying with ${type} via reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+    const replyResult = await wsSend(buildRespondMsg(req.reqId, type, payload), req.reqId);
+    if (replyResult.ok) return { ok: true, mode: `reply-${type}` };
+    console.log(`[wecom] Media reply failed, falling back to proactive: ${replyResult.error || 'unknown error'}`);
+  }
+
+  const chatId = resolveChatTarget(target);
+  console.log(`[wecom] Sending proactive ${type} to chatId: ${chatId}`);
+  const { data, reqId } = buildSendMsg(chatId, type, payload);
+  const proactiveResult = await wsSend(data, reqId);
+  return proactiveResult.ok
+    ? { ok: true, mode: `proactive-${type}` }
+    : { ok: false, error: proactiveResult.error || `proactive ${type} send failed` };
+}
+
 /**
  * Send a reply to a message callback (using original reqId).
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_respond_msg.
@@ -1439,14 +1540,22 @@ function startInternalServer() {
 
 async function handleInternalRequest(url, data, res) {
   if (url === '/internal/send') {
-    const { target, msgId, content, skip } = data;
-    if (!target || (!skip && !content)) {
+    const { target, msgId, content, skip, mediaPath, mediaType } = data;
+    if (!target || (!skip && !content && !mediaPath)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Missing target or content' }));
       return;
     }
 
-    const result = skip ? await skipMessage(target, msgId) : await sendMessage(target, msgId, content);
+    let result;
+    if (skip) {
+      result = await skipMessage(target, msgId);
+    } else if (mediaPath) {
+      const type = MEDIA_SIZE_LIMITS_MB[mediaType] ? mediaType : 'file';
+      result = await sendMediaMessage(target, msgId, mediaPath, type);
+    } else {
+      result = await sendMessage(target, msgId, content);
+    }
     res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
 
