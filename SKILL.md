@@ -151,6 +151,14 @@ asked and answered in that group instead of treating every mention as a
 cold start. History is kept in memory (last `message.context_messages`
 entries per chat) and does not survive a service restart.
 
+Since every context entry was already forwarded to the agent when it
+arrived, attaching it to every message would be pure duplication during a
+live exchange. The block is therefore **idle-gated**: it is attached only
+when the chat has been quiet for at least `message.context_idle_minutes`
+(default 30) — i.e. when the conversation resumes after a gap, which is
+when the agent's own session is likely to have rotated and the recap is
+actually needed. Set it to `0` to attach context on every message.
+
 The bot's own replies in the context are labeled with its display name,
 resolved in this order:
 

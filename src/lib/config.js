@@ -39,6 +39,13 @@ export const DEFAULT_CONFIG = {
   // Message settings
   message: {
     context_messages: 10,
+    // Attach <group-context> only when the chat has been idle for at least
+    // this many minutes. Everything in the context was already forwarded to
+    // the agent when it arrived (WeCom only pushes @bot messages), so during
+    // a rapid exchange the block is pure duplication; after a long gap the
+    // agent's session has likely rotated and the recap is useful. 0 = always
+    // attach (legacy behavior).
+    context_idle_minutes: 30,
     // Label for the bot's own replies inside <group-context>. Empty = auto-learn
     // from the "@<bot name>" mention prefix of incoming group messages (the
     // protocol never provides the bot's name directly); final fallback: 'bot'.

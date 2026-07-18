@@ -452,6 +452,7 @@ function sleep(ms) {
 // In-memory chat history for context
 // ============================================================
 const DEFAULT_HISTORY_LIMIT = 5;
+const DEFAULT_CONTEXT_IDLE_MINUTES = 30;
 const chatHistories = new Map();
 
 function recordHistoryEntry(chatId, entry) {
@@ -499,6 +500,20 @@ function getContextMessages(chatId, currentMsgId) {
   if (!history || history.length === 0) return [];
   const limit = config.message?.context_messages || DEFAULT_HISTORY_LIMIT;
   const filtered = history.filter(m => m.msgId !== currentMsgId);
+  if (filtered.length === 0) return [];
+
+  // Context is only worth attaching after an idle gap: every entry was
+  // already forwarded to the agent when it arrived, so mid-conversation the
+  // block is pure duplication. After a long gap the agent's session has
+  // likely rotated, and the recap restores the thread. 0 disables the gate.
+  const idleMinutes = config.message?.context_idle_minutes ?? DEFAULT_CONTEXT_IDLE_MINUTES;
+  if (idleMinutes > 0) {
+    const lastTs = Date.parse(filtered[filtered.length - 1].timestamp);
+    if (Number.isFinite(lastTs) && Date.now() - lastTs < idleMinutes * 60 * 1000) {
+      return [];
+    }
+  }
+
   const count = Math.min(limit, filtered.length);
   return filtered.slice(-count);
 }
