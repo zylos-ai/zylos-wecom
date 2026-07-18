@@ -70,6 +70,7 @@ fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
 // State files
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
+const BOT_NAME_CACHE_PATH = path.join(DATA_DIR, 'bot-name.json');
 
 if (!config.enabled) {
   console.log(`[wecom] ${localizedRuntimeMessage('runtime_disabled_exit')}`);
@@ -452,6 +453,7 @@ function sleep(ms) {
 // In-memory chat history for context
 // ============================================================
 const DEFAULT_HISTORY_LIMIT = 5;
+const DEFAULT_CONTEXT_IDLE_MINUTES = 30;
 const chatHistories = new Map();
 
 function recordHistoryEntry(chatId, entry) {
@@ -469,38 +471,121 @@ function recordHistoryEntry(chatId, entry) {
   }
 }
 
+// The bot's display name, used to label its own replies inside
+// <group-context>. The protocol never provides it (body.from carries userid
+// only, and there is no bot-name field), but the server only pushes group
+// messages that mention the bot — so a message containing exactly one
+// distinct "@name" token necessarily names the bot, wherever the mention
+// sits in the text. config.message.bot_name overrides the learned value;
+// last resort is the literal 'bot'. Persisted to bot-name.json so a
+// restart does not have to wait for the next single-mention message.
+let learnedBotName = '';
+try {
+  if (fs.existsSync(BOT_NAME_CACHE_PATH)) {
+    const cached = JSON.parse(fs.readFileSync(BOT_NAME_CACHE_PATH, 'utf8'));
+    if (typeof cached?.name === 'string' && cached.name) {
+      learnedBotName = cached.name;
+      console.log(`[wecom] Loaded bot display name from cache: ${learnedBotName}`);
+    }
+  }
+} catch (err) {
+  console.log(`[wecom] Failed to load bot-name cache: ${err.message}`);
+}
+
+function learnBotNameFromMention(text) {
+  const raw = String(text || '');
+  // Collect distinct @tokens (terminated by whitespace \u2014 \s covers U+2005,
+  // the WeChat-family mention terminator \u2014 or another @). Exactly one
+  // distinct token = it names the bot; multi-mention messages are skipped
+  // as ambiguous. Runs on every group message (not learn-once) so a rename
+  // of the bot in WeCom is picked up from the next single-mention message.
+  // Names containing spaces get truncated at the first space \u2014 set
+  // config.message.bot_name to override in that case.
+  const tokens = new Set();
+  const tokenRe = /@([^\s@]{1,64})/g;
+  let match;
+  while ((match = tokenRe.exec(raw)) !== null) {
+    tokens.add(match[1]);
+  }
+  if (tokens.size !== 1) return;
+  const name = [...tokens][0].trim();
+  if (!name || name === learnedBotName) return;
+  const renamed = Boolean(learnedBotName);
+  learnedBotName = name;
+  console.log(`[wecom] ${renamed ? 'Updated' : 'Learned'} bot display name from mention: ${name}`);
+  try {
+    fs.writeFileSync(BOT_NAME_CACHE_PATH, JSON.stringify({ name, learnedAt: new Date().toISOString() }) + '\n');
+  } catch (err) {
+    console.log(`[wecom] Failed to persist bot-name cache: ${err.message}`);
+  }
+}
+
+function botDisplayName() {
+  return config.message?.bot_name || learnedBotName || 'bot';
+}
+
 function getContextMessages(chatId, currentMsgId) {
   const history = chatHistories.get(chatId);
   if (!history || history.length === 0) return [];
   const limit = config.message?.context_messages || DEFAULT_HISTORY_LIMIT;
   const filtered = history.filter(m => m.msgId !== currentMsgId);
+  if (filtered.length === 0) return [];
+
+  // Context is only worth attaching after an idle gap: every entry was
+  // already forwarded to the agent when it arrived, so mid-conversation the
+  // block is pure duplication. After a long gap the agent's session has
+  // likely rotated, and the recap restores the thread. 0 disables the gate.
+  const idleMinutes = config.message?.context_idle_minutes ?? DEFAULT_CONTEXT_IDLE_MINUTES;
+  if (idleMinutes > 0) {
+    const lastTs = Date.parse(filtered[filtered.length - 1].timestamp);
+    if (Number.isFinite(lastTs) && Date.now() - lastTs < idleMinutes * 60 * 1000) {
+      return [];
+    }
+  }
+
   const count = Math.min(limit, filtered.length);
   return filtered.slice(-count);
 }
 
+// Escape only what protects the C4 tag structure (<current-message> etc.)
+// from being broken or spoofed by user text. Quotes are element content
+// here, not attribute values — escaping them adds no protection and makes
+// the agent-visible text noisy (&quot;...&quot;).
 function escapeXml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/'/g, '&apos;')
-    .replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;');
 }
 
-function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null) {
+function formatC4Message(chatType, senderName, text, contextMessages = [], mediaPath = null, groupName = null, quotedContent = '') {
   const prefix = chatType === 'group'
     ? `[WeCom GROUP:${escapeXml(groupName || 'unknown')}]`
     : '[WeCom DM]';
-  const parts = [`${prefix} ${escapeXml(senderName)} said: `];
+  // The sender belongs to <current-message>, not the envelope: with the
+  // context block in between, "X said: <group-context>..." read as if X had
+  // said the context.
+  const parts = [`${prefix} `];
 
   if (contextMessages.length > 0) {
     const contextLines = contextMessages
-      .map((message) => `[${escapeXml(message.userName || message.userId || 'unknown')}]: ${escapeXml(message.text)}`)
+      .map((message) => {
+        // Bot entries resolve their label at read time, so a name learned
+        // (or configured) after the entry was recorded still applies.
+        const label = message.userId === 'bot'
+          ? botDisplayName()
+          : (message.userName || message.userId || 'unknown');
+        return `[${escapeXml(label)}]: ${escapeXml(message.text)}`;
+      })
       .join('\n');
     parts.push(`<group-context>\n${contextLines}\n</group-context>\n\n`);
   }
 
-  parts.push(`<current-message>\n${escapeXml(text)}\n</current-message>`);
+  if (quotedContent) {
+    parts.push(`<replying-to>\n${escapeXml(quotedContent)}\n</replying-to>\n\n`);
+  }
+
+  parts.push(`<current-message>\n${escapeXml(senderName)} said: ${escapeXml(text)}\n</current-message>`);
 
   let message = parts.join('');
   if (mediaPath) {
@@ -555,7 +640,7 @@ function checkDmPermission(userId) {
   }
 }
 
-function checkGroupPermission(chatId, userId, isMentioned) {
+function checkGroupPermission(chatId, userId) {
   const policy = config.groupPolicy || 'allowlist';
   if (isOwner(userId)) return true;
   switch (policy) {
@@ -564,10 +649,9 @@ function checkGroupPermission(chatId, userId, isMentioned) {
     case 'allowlist': {
       const groupConfig = config.groups?.[chatId];
       if (!groupConfig) return false;
-      // Check mode: "mention" requires @bot mention, "smart" receives all.
-      // Legacy configs may only have requireMention without mode.
-      const mode = groupConfig.mode || (groupConfig.requireMention === false ? 'smart' : 'mention');
-      if (mode === 'mention' && !isMentioned) return false;
+      // No mention check: WeCom only delivers group callbacks when the bot is
+      // @-mentioned (developer.work.weixin.qq.com/document/path/100719), so a
+      // group callback arriving at all implies the bot was mentioned.
       // Check allowFrom sender restriction
       if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
         if (groupConfig.allowFrom.includes('*')) return true;
@@ -833,7 +917,6 @@ async function processCallback(frame) {
   if (cmd === 'aibot_msg_callback') {
     const reqId = headers?.req_id;
     const msgId = body?.msgid;
-    const aibotId = body?.aibotid;
     const chatId = body?.chatid;
     const chatType = body?.chattype; // 'single' or 'group'
     const fromUser = body?.from?.userid;
@@ -870,13 +953,9 @@ async function processCallback(frame) {
     }
 
     // Permission check
-    // For groups, detect if bot was @mentioned (used for mention mode filtering)
-    const isMentioned = isGroup && aibotId && (
-      body?.text?.content?.includes(`@${aibotId}`)
-      || body?.mixed?.items?.some((item) => item?.msgtype === 'text' && item?.text?.content?.includes(`@${aibotId}`))
-    );
+    const mixedItems = body?.mixed?.msg_item || body?.mixed?.items;
     if (isGroup) {
-      if (!checkGroupPermission(chatId, fromUser, isMentioned)) {
+      if (!checkGroupPermission(chatId, fromUser)) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
         return;
       }
@@ -948,13 +1027,27 @@ async function processCallback(frame) {
         }
         break;
       case 'mixed': {
-        // Mixed message: text + images
         const parts = [];
-        if (body?.mixed?.items) {
-          for (const item of body.mixed.items) {
-            if (item.msgtype === 'text') {
-              parts.push(item.text?.content || '');
-            } else if (item.msgtype === 'image') {
+        for (const item of (mixedItems || [])) {
+          if (item.msgtype === 'text') {
+            parts.push(item.text?.content || '');
+          } else if (item.msgtype === 'image') {
+            try {
+              const imgDl = await downloadIncomingMedia(
+                item.image?.url,
+                item.image?.aeskey,
+                item.image?.filename,
+                'wecom-image',
+                msgId
+              );
+              if (imgDl) {
+                if (!filePath) filePath = imgDl.path;
+                parts.push(`[image: ${imgDl.filename}]`);
+              } else {
+                parts.push('[image]');
+              }
+            } catch (err) {
+              console.error(`[wecom] Failed to download mixed image ${msgId}: ${err.message}`);
               parts.push('[image]');
             }
           }
@@ -967,11 +1060,39 @@ async function processCallback(frame) {
         break;
     }
 
-    if (!textContent) return;
+    // Extract quoted/replied message if present (forwarded as a <replying-to> block)
+    let quotedContent = '';
+    if (body?.quote) {
+      switch (body.quote.msgtype) {
+        case 'text':
+          quotedContent = body.quote.text?.content || '';
+          break;
+        case 'image':
+          quotedContent = '[image]';
+          break;
+        case 'mixed': {
+          const qItems = body.quote.mixed?.msg_item || body.quote.mixed?.items || [];
+          quotedContent = qItems.map(i => i.msgtype === 'text' ? (i.text?.content || '') : `[${i.msgtype}]`).join(' ');
+          break;
+        }
+        default:
+          quotedContent = `[${body.quote.msgtype || 'unknown'} message]`;
+          break;
+      }
+    }
 
-    // Strip @bot mention from group messages (only strip the bot's own mention)
-    if (isGroup && aibotId) {
-      textContent = textContent.replace(new RegExp(`@${aibotId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'g'), '').trim();
+    if (!textContent && !quotedContent) return;
+
+    // Mentions are forwarded verbatim ("@<display name>" plain text), same as
+    // the lark and telegram components. Stripping is not attempted: the bot's
+    // display name is not available in this protocol mode (body.from has no
+    // name, there is no bot-name field), so any heuristic risks eating a
+    // leading mention of someone else, and the prefix carries real
+    // information (who was addressed).
+    textContent = textContent.trim();
+
+    if (isGroup) {
+      learnBotNameFromMention(textContent);
     }
 
     // Record to history
@@ -979,19 +1100,19 @@ async function processCallback(frame) {
       msgId,
       userId: fromUser,
       userName: senderName,
-      text: textContent,
+      text: textContent || `[replying to: "${quotedContent}"]`,
       timestamp: new Date().toISOString()
     });
 
     if (isGroup) {
       const groupName = config.groups?.[chatId]?.name || chatId;
       const context = getContextMessages(chatId, msgId);
-      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName);
+      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName, quotedContent);
       const endpoint = `${chatId}|type:group|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     } else {
       const context = getContextMessages(fromUser, msgId);
-      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath);
+      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath, null, quotedContent);
       const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
       forwardToC4(formattedMessage, endpoint);
     }
@@ -1269,7 +1390,7 @@ async function handleInternalRequest(url, data, res) {
     recordHistoryEntry(String(chatId), {
       msgId: `out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       userId: 'bot',
-      userName: 'bot',
+      userName: botDisplayName(),
       text: String(text).slice(0, 4000),
       timestamp: new Date().toISOString()
     });

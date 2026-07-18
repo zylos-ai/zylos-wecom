@@ -11,7 +11,7 @@ zylos-wecom 管理 CLI（WebSocket Bot 模式）
 
   群管理：
   list-groups                         列出所有已配置群
-  add-group <chat_id> <name> [mode]   添加群（mode: mention|smart）
+  add-group <chat_id> <name>           添加群
   remove-group <chat_id>              移除群
   set-group-policy <policy>           设置群策略（disabled|allowlist|open）
   set-group-allowfrom <chat_id> <ids> 设置群内允许发送者
@@ -40,7 +40,7 @@ Commands:
 
   Group Management:
   list-groups                         List all configured groups
-  add-group <chat_id> <name> [mode]   Add a group (mode: mention|smart)
+  add-group <chat_id> <name>           Add a group
   remove-group <chat_id>              Remove a group
   set-group-policy <policy>           Set group policy (disabled|allowlist|open)
   set-group-allowfrom <chat_id> <ids> Set per-group allowed senders
@@ -69,12 +69,11 @@ const MESSAGES = {
     admin_no_groups: '当前没有配置群聊',
     admin_group_policy: '群策略: {policy}',
     admin_configured_groups: '\n已配置群聊（{count}）：',
-    admin_group_entry: '  {chatId} - {name} [{mode}]{allowFrom}',
+    admin_group_entry: '  {chatId} - {name}{allowFrom}',
     admin_unnamed: '未命名',
-    admin_usage_add_group: '用法: admin.js add-group <chat_id> <name> [mode=mention|smart]',
-    admin_mode_invalid: 'mode 必须是 "mention" 或 "smart"',
-    admin_group_exists: '群 {chatId} 已存在，更新 mode 为 {mode}',
-    admin_group_added: '已添加群: {chatId} ({name}) [{mode}]',
+    admin_usage_add_group: '用法: admin.js add-group <chat_id> <name>',
+    admin_group_updated: '群 {chatId} 已存在，名称更新为 {name}',
+    admin_group_added: '已添加群: {chatId} ({name})',
     admin_restart_hint: '执行: pm2 restart zylos-wecom',
     admin_usage_remove_group: '用法: admin.js remove-group <chat_id>',
     admin_group_removed: '已移除群: {chatId} ({name})',
@@ -185,12 +184,11 @@ const MESSAGES = {
     admin_no_groups: 'No groups configured',
     admin_group_policy: 'Group Policy: {policy}',
     admin_configured_groups: '\nConfigured Groups ({count}):',
-    admin_group_entry: '  {chatId} - {name} [{mode}]{allowFrom}',
+    admin_group_entry: '  {chatId} - {name}{allowFrom}',
     admin_unnamed: 'unnamed',
-    admin_usage_add_group: 'Usage: admin.js add-group <chat_id> <name> [mode=mention|smart]',
-    admin_mode_invalid: 'Mode must be "mention" or "smart"',
-    admin_group_exists: 'Group {chatId} already configured, updating mode to {mode}',
-    admin_group_added: 'Added group: {chatId} ({name}) [{mode}]',
+    admin_usage_add_group: 'Usage: admin.js add-group <chat_id> <name>',
+    admin_group_updated: 'Group {chatId} already configured, name updated to {name}',
+    admin_group_added: 'Added group: {chatId} ({name})',
     admin_restart_hint: 'Run: pm2 restart zylos-wecom',
     admin_usage_remove_group: 'Usage: admin.js remove-group <chat_id>',
     admin_group_removed: 'Removed group: {chatId} ({name})',

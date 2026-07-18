@@ -33,13 +33,23 @@ export const DEFAULT_CONFIG = {
   // Group policy: 'open' (all groups), 'allowlist' (only configured groups), 'disabled' (no groups)
   groupPolicy: 'allowlist',
   // Per-group configuration map
-  // Format: { "chatId": { name, mode, allowFrom } }
-  // mode: "mention" (respond to @mentions) or "smart" (receive all messages)
-  // Legacy config field "requireMention" is still supported for backward compatibility.
+  // Format: { "chatId": { name, allowFrom } }
+  // WeCom only pushes @-mentioned messages in groups (platform limitation).
   groups: {},
   // Message settings
   message: {
     context_messages: 10,
+    // Attach <group-context> only when the chat has been idle for at least
+    // this many minutes. Everything in the context was already forwarded to
+    // the agent when it arrived (WeCom only pushes @bot messages), so during
+    // a rapid exchange the block is pure duplication; after a long gap the
+    // agent's session has likely rotated and the recap is useful. 0 = always
+    // attach (legacy behavior).
+    context_idle_minutes: 30,
+    // Label for the bot's own replies inside <group-context>. Empty = auto-learn
+    // from the "@<bot name>" mention in incoming group messages (the protocol
+    // never provides the bot's name directly); final fallback: 'bot'.
+    bot_name: '',
     locale: 'zh-CN',
     welcome_text: '',  // legacy fallback; empty = no auto-reply; non-empty = auto-reply
     welcome_texts: {}  // locale-aware welcome messages, keyed by locale (e.g. zh-CN, en-US)

@@ -86,7 +86,7 @@ $ADM remove-dm-allow <user_id>                # Remove user from dmAllowFrom
 
 # Group Management
 $ADM list-groups                              # List all configured groups
-$ADM add-group <chat_id> <name> [mode]        # Add group (mode: mention|smart)
+$ADM add-group <chat_id> <name>               # Add group
 $ADM remove-group <chat_id>                   # Remove a group
 $ADM set-group-policy <disabled|allowlist|open>  # Set group policy
 ```
@@ -123,8 +123,57 @@ WECOM_BOT_SECRET=your_bot_secret
 
 ### 3. Message Types
 
-Supported incoming: text, image, voice (auto-transcribed), video, file, mixed
 Supported outgoing: text, markdown
+
+Supported incoming (varies by chat type):
+
+| Type | DM | Group |
+|---|---|---|
+| text | Yes | Yes (@ only) |
+| mixed (text+image) | Yes | Yes (@ only) |
+| image (standalone) | Yes | Not pushed |
+| file | Yes | Not pushed |
+| voice (auto-transcribed) | Yes | Not pushed |
+| video | Yes | Not pushed |
+
+**Group chat limitations (WeCom platform-level):**
+- WeCom only pushes group messages where the bot is @-mentioned. Non-@ messages are never delivered.
+- Only `text` and `mixed` types are pushed in group chats. File, voice, video, and standalone image messages are silently dropped by the server.
+
+### 4. Group Context
+
+Group messages forwarded to the agent include a `<group-context>` block with
+recent history. Because WeCom only delivers @-mentions (see limitations
+above), this context can only ever contain earlier @bot messages and the
+bot's own replies — it is the bot's conversation thread, **not** the full
+group discussion. Its value is continuity: the agent sees what was already
+asked and answered in that group instead of treating every mention as a
+cold start. History is kept in memory (last `message.context_messages`
+entries per chat) and does not survive a service restart.
+
+Since every context entry was already forwarded to the agent when it
+arrived, attaching it to every message would be pure duplication during a
+live exchange. The block is therefore **idle-gated**: it is attached only
+when the chat has been quiet for at least `message.context_idle_minutes`
+(default 30) — i.e. when the conversation resumes after a gap, which is
+when the agent's own session is likely to have rotated and the recap is
+actually needed. Set it to `0` to attach context on every message.
+
+The bot's own replies in the context are labeled with its display name,
+resolved in this order:
+
+1. `message.bot_name` in config.json (explicit override)
+2. Name auto-learned from incoming group messages: since WeCom only pushes
+   messages that mention the bot, a message containing exactly one distinct
+   `@name` token necessarily names the bot, wherever the mention sits.
+   Persisted to `bot-name.json` in the data directory (survives restarts)
+   and re-evaluated on every group message, so renaming the bot in WeCom is
+   picked up from the next single-mention message; multi-mention messages
+   are skipped as ambiguous.
+3. Literal `bot`
+
+Set `message.bot_name` if auto-learning cannot apply (e.g. the bot's display
+name contains spaces, which truncates at the first space).
 
 ## Owner
 
