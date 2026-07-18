@@ -135,11 +135,13 @@ Supported outgoing: text, markdown, image, file
 
 Media is uploaded over the long connection in chunks (≤512KB × ≤100 chunks)
 and sent by `media_id`. Size caps: image 10MB, file 20MB (voice 2MB, video
-10MB at the protocol level; not yet exposed via send.js). The reply path
-(`aibot_respond_msg`, within 24h of a callback) officially supports media;
-the proactive path (`aibot_send_msg`) is documented inconsistently and needs
-live verification. On upload/send failure the send fails loudly (exit 1) —
-there is no silent text fallback.
+10MB at the protocol level; not yet exposed via send.js). Both send paths
+support media: the reply path (`aibot_respond_msg`, within 24h of a
+callback) per official docs, and the proactive path (`aibot_send_msg`)
+**live-verified 2026-07-18** for image and file — the official doc's field
+table claiming markdown/template_card-only for proactive sends is wrong
+(protocol evidence: zylos-wecom#14). On upload/send failure the send fails
+loudly (exit 1) — there is no silent text fallback.
 
 Supported incoming (varies by chat type):
 
