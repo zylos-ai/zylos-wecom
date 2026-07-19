@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.5] - 2026-07-19
+
+### Added
+- Outbound image/file sending via chunked media upload over the long
+  connection (`aibot_upload_media_init/chunk/finish`), with the
+  `[MEDIA:image]` / `[MEDIA:file]` send convention in `scripts/send.js`;
+  reply path preferred, proactive path as fallback, loud failure with no
+  silent text downgrade (#14)
+- Per-chat JSONL history persistence with tail replay on restart, so group
+  context, idle gating, and learned bot names survive service restarts (#16)
+- Idle-gated group-context delivery, continuous bot display-name learning,
+  and restructured message envelope (#13)
+- `references/platform-limitations.md`: on-demand FAQ covering visibility
+  scope, group message-type limits, quoted-media behavior, DM vs group
+  differences, external groups, and media size/rate limits
+
+### Fixed
+- Mixed-message field name and quote parsing; group-chat documentation (#13)
+- mcp-config tests no longer write into the real component data dir: the
+  doc MCP config path resolves via `os.homedir()` at call time instead of
+  import time (#15)
+
+### Removed
+- Smart mode (#13)
+
 ## [0.1.4] - 2026-05-18
 
 ### Fixed
