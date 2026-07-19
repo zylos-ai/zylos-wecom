@@ -157,6 +157,22 @@ Supported incoming (varies by chat type):
 **Group chat limitations (WeCom platform-level):**
 - WeCom only pushes group messages where the bot is @-mentioned. Non-@ messages are never delivered.
 - Only `text` and `mixed` types are pushed in group chats. File, voice, video, and standalone image messages are silently dropped by the server.
+- Non-owner users can only @-mention the bot if they are inside the bot's
+  **visibility scope** (可见范围) configured in the WeCom admin console. A
+  user outside that scope cannot reach the bot in a group at all.
+
+**Quote limitations (apply to both DM and group, live-verified 2026-07-18):**
+- A quoted message carries no sender identity — the bot cannot tell who
+  wrote the quoted text.
+- Images/files inside a quote arrive as bare `[image]`/`[file]` tags with
+  no binary data. The bot can see *that* media was quoted, never the media
+  itself. If a user asks "why can't you see the picture I quoted", this is
+  the answer: WeCom does not deliver quoted media content to bots.
+
+**DM vs group:** DMs have none of the group-side type restrictions — no
+@-mention needed, all message types (standalone image, file, voice, video)
+are pushed, and media is downloaded automatically. When a user hits a group
+limitation above, receiving the content via DM is the reliable workaround.
 
 ### 4. Group Context
 
