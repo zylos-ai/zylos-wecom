@@ -93,14 +93,20 @@ function getInternalToken() {
 /**
  * Send a request to the internal API.
  */
-async function internalSend(target, msgId, content, skip = false) {
+async function internalSend(target, msgId, content, skip = false, media = null) {
   const token = getInternalToken();
   if (!token) {
     throw new Error('Internal token not available — is the main process running?');
   }
 
   const port = config.internal_port || 4459;
-  const body = JSON.stringify({ target, msgId, content, skip });
+  const body = JSON.stringify({
+    target,
+    msgId,
+    content,
+    skip,
+    ...(media ? { mediaPath: media.path, mediaType: media.type } : {})
+  });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -157,12 +163,32 @@ async function recordOutgoing(text) {
   }
 }
 
+/**
+ * Parse the C4 media convention: "[MEDIA:image]<path>" / "[MEDIA:file]<path>".
+ * Returns { type, path } or null for plain text.
+ */
+function parseMediaMessage(msg) {
+  for (const type of ['image', 'file']) {
+    const prefix = `[MEDIA:${type}]`;
+    if (msg.startsWith(prefix)) {
+      return { type, path: msg.substring(prefix.length).trim() };
+    }
+  }
+  return null;
+}
+
 async function send() {
   try {
     const skip = message.trim() === '[SKIP]';
-    await internalSend(targetUser, msgId, skip ? '' : message, skip);
+    const media = skip ? null : parseMediaMessage(message);
+    await internalSend(targetUser, msgId, skip || media ? '' : message, skip, media);
     if (!skip) {
-      await recordOutgoing(message);
+      if (media) {
+        const label = media.type === 'image' ? 'an image' : 'a file';
+        await recordOutgoing(`[sent ${label}: ${path.basename(media.path)}]`);
+      } else {
+        await recordOutgoing(message);
+      }
     }
     console.log(t(locale, 'send_success'));
     process.exit(0);

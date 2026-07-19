@@ -65,8 +65,10 @@ console.log(`[wecom] ${localizedRuntimeMessage('runtime_data_dir', { dir: DATA_D
 // Ensure directories
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const HISTORY_DIR = path.join(DATA_DIR, 'history');
 fs.mkdirSync(LOGS_DIR, { recursive: true });
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
+fs.mkdirSync(HISTORY_DIR, { recursive: true });
 
 // State files
 const USER_CACHE_PATH = path.join(DATA_DIR, 'user-cache.json');
@@ -450,11 +452,18 @@ function sleep(ms) {
 }
 
 // ============================================================
-// In-memory chat history for context
+// Chat history for context: in-memory + per-chat JSONL dual-write
+// (telegram pattern — memory is the hot path, the JSONL file is an
+// append-only audit log whose tail is replayed after a restart)
 // ============================================================
 const DEFAULT_HISTORY_LIMIT = 5;
 const DEFAULT_CONTEXT_IDLE_MINUTES = 30;
 const chatHistories = new Map();
+const replayedChats = new Set();
+
+function historyLogFile(chatId) {
+  return path.join(HISTORY_DIR, `${String(chatId).replace(/[^A-Za-z0-9_-]/g, '_')}.jsonl`);
+}
 
 function recordHistoryEntry(chatId, entry) {
   if (!chatHistories.has(chatId)) {
@@ -469,6 +478,68 @@ function recordHistoryEntry(chatId, entry) {
   if (history.length > limit * 2) {
     chatHistories.set(chatId, history.slice(-limit));
   }
+}
+
+// On first access after a restart, repopulate memory from the tail of the
+// chat's JSONL file (only the tail is read so large logs stay cheap).
+function ensureHistoryReplay(chatId) {
+  chatId = String(chatId);
+  if (replayedChats.has(chatId)) return;
+  const logFile = historyLogFile(chatId);
+  if (!fs.existsSync(logFile)) {
+    replayedChats.add(chatId);
+    return;
+  }
+  const limit = config.message?.context_messages || DEFAULT_HISTORY_LIMIT;
+  try {
+    const stat = fs.statSync(logFile);
+    const BYTES_PER_ENTRY = 512;
+    const readSize = Math.min(stat.size, limit * BYTES_PER_ENTRY * 2);
+    let content;
+    if (readSize < stat.size) {
+      const buf = Buffer.alloc(readSize);
+      const fd = fs.openSync(logFile, 'r');
+      try {
+        fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+      } finally {
+        fs.closeSync(fd);
+      }
+      // Drop the first (potentially partial) line
+      const text = buf.toString('utf8');
+      const firstNewline = text.indexOf('\n');
+      content = firstNewline !== -1 ? text.slice(firstNewline + 1) : text;
+    } else {
+      content = fs.readFileSync(logFile, 'utf8');
+    }
+    const tail = content.trim().split('\n').filter(Boolean).slice(-limit);
+    for (const line of tail) {
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      recordHistoryEntry(chatId, entry);
+    }
+    replayedChats.add(chatId);
+    if (tail.length > 0) {
+      console.log(`[wecom] Replayed ${tail.length} history entries for ${chatId}`);
+    }
+  } catch (err) {
+    // Not marked as replayed — retried on the next message
+    console.error(`[wecom] History replay failed for ${chatId}: ${err.message}`);
+  }
+}
+
+function logAndRecordHistory(chatId, entry) {
+  chatId = String(chatId);
+  ensureHistoryReplay(chatId);
+  try {
+    fs.appendFileSync(historyLogFile(chatId), JSON.stringify(entry) + '\n');
+  } catch (err) {
+    console.error(`[wecom] History write failed for ${chatId}: ${err.message}`);
+  }
+  recordHistoryEntry(chatId, entry);
 }
 
 // The bot's display name, used to label its own replies inside
@@ -828,6 +899,107 @@ async function refreshDocMcpConfig() {
   return refreshed;
 }
 
+// ============================================================
+// Outbound media: chunked upload over the long connection (issue #14)
+// Protocol: aibot_upload_media_init/chunk/finish, then msgtype image/file/
+// voice/video with the returned media_id. Chunks ≤512KB pre-base64, ≤100
+// chunks, upload session valid 30 min, media_id valid 3 days.
+// ============================================================
+const MEDIA_CHUNK_BYTES = 512 * 1024;
+const MEDIA_MAX_CHUNKS = 100;
+const MEDIA_SIZE_LIMITS_MB = { image: 10, voice: 2, video: 10, file: 20 };
+const MEDIA_UPLOAD_TIMEOUT_MS = 30000;
+
+function mediaResponseError(frame, stage) {
+  if (typeof frame?.errcode === 'number' && frame.errcode !== 0) {
+    return `${stage} failed: ${frame.errcode} ${frame.errmsg || ''}`.trim();
+  }
+  if (typeof frame?.body?.code === 'number' && frame.body.code !== 0) {
+    return `${stage} failed: ${frame.body.code} ${frame.body.msg || ''}`.trim();
+  }
+  return null;
+}
+
+async function uploadMedia(filePath, type) {
+  const stat = fs.statSync(filePath);
+  const limitMb = MEDIA_SIZE_LIMITS_MB[type] || MEDIA_SIZE_LIMITS_MB.file;
+  if (stat.size > limitMb * 1024 * 1024) {
+    throw new Error(`${path.basename(filePath)} exceeds the ${limitMb}MB ${type} limit`);
+  }
+  const data = fs.readFileSync(filePath);
+  const totalChunks = Math.max(1, Math.ceil(data.length / MEDIA_CHUNK_BYTES));
+  if (totalChunks > MEDIA_MAX_CHUNKS) {
+    throw new Error(`${path.basename(filePath)} needs ${totalChunks} chunks (max ${MEDIA_MAX_CHUNKS})`);
+  }
+
+  const initFrame = await wsRequest('aibot_upload_media_init', {
+    type,
+    filename: path.basename(filePath),
+    total_size: data.length,
+    total_chunks: totalChunks,
+    md5: crypto.createHash('md5').update(data).digest('hex')
+  }, { timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS });
+  const initError = mediaResponseError(initFrame, 'media upload init');
+  if (initError) throw new Error(initError);
+  const uploadId = initFrame?.body?.upload_id;
+  if (!uploadId) throw new Error('media upload init returned no upload_id');
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = data.subarray(i * MEDIA_CHUNK_BYTES, (i + 1) * MEDIA_CHUNK_BYTES);
+    const chunkFrame = await wsRequest('aibot_upload_media_chunk', {
+      upload_id: uploadId,
+      chunk_index: i,
+      base64_data: chunk.toString('base64')
+    }, { timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS });
+    const chunkError = mediaResponseError(chunkFrame, `media upload chunk ${i}`);
+    if (chunkError) throw new Error(chunkError);
+  }
+
+  const finishFrame = await wsRequest('aibot_upload_media_finish', {
+    upload_id: uploadId
+  }, { timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS });
+  const finishError = mediaResponseError(finishFrame, 'media upload finish');
+  if (finishError) throw new Error(finishError);
+  const mediaId = finishFrame?.body?.media_id;
+  if (!mediaId) throw new Error('media upload finish returned no media_id');
+  return mediaId;
+}
+
+/**
+ * Send a media message: upload, then reply (high confidence per docs) with
+ * proactive aibot_send_msg as the fallback path. No silent text fallback —
+ * a failure is returned to the caller so the agent knows delivery failed.
+ */
+async function sendMediaMessage(target, msgId, filePath, type) {
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `File not found: ${filePath}` };
+  }
+  let mediaId;
+  try {
+    mediaId = await uploadMedia(filePath, type);
+  } catch (err) {
+    console.error(`[wecom] Media upload failed for ${filePath}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+
+  const payload = { [type]: { media_id: mediaId } };
+  const req = msgId ? getRequest(msgId) : null;
+  if (req) {
+    console.log(`[wecom] Replying with ${type} via reqId ${req.reqId.substring(0, 8)}... to ${target}`);
+    const replyResult = await wsSend(buildRespondMsg(req.reqId, type, payload), req.reqId);
+    if (replyResult.ok) return { ok: true, mode: `reply-${type}` };
+    console.log(`[wecom] Media reply failed, falling back to proactive: ${replyResult.error || 'unknown error'}`);
+  }
+
+  const chatId = resolveChatTarget(target);
+  console.log(`[wecom] Sending proactive ${type} to chatId: ${chatId}`);
+  const { data, reqId } = buildSendMsg(chatId, type, payload);
+  const proactiveResult = await wsSend(data, reqId);
+  return proactiveResult.ok
+    ? { ok: true, mode: `proactive-${type}` }
+    : { ok: false, error: proactiveResult.error || `proactive ${type} send failed` };
+}
+
 /**
  * Send a reply to a message callback (using original reqId).
  * WeCom 智能机器人 WebSocket only supports markdown msgtype for aibot_respond_msg.
@@ -1095,8 +1267,8 @@ async function processCallback(frame) {
       learnBotNameFromMention(textContent);
     }
 
-    // Record to history
-    recordHistoryEntry(isGroup ? chatId : fromUser, {
+    // Record to history (memory + JSONL)
+    logAndRecordHistory(isGroup ? chatId : fromUser, {
       msgId,
       userId: fromUser,
       userName: senderName,
@@ -1368,14 +1540,22 @@ function startInternalServer() {
 
 async function handleInternalRequest(url, data, res) {
   if (url === '/internal/send') {
-    const { target, msgId, content, skip } = data;
-    if (!target || (!skip && !content)) {
+    const { target, msgId, content, skip, mediaPath, mediaType } = data;
+    if (!target || (!skip && !content && !mediaPath)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Missing target or content' }));
       return;
     }
 
-    const result = skip ? await skipMessage(target, msgId) : await sendMessage(target, msgId, content);
+    let result;
+    if (skip) {
+      result = await skipMessage(target, msgId);
+    } else if (mediaPath) {
+      const type = MEDIA_SIZE_LIMITS_MB[mediaType] ? mediaType : 'file';
+      result = await sendMediaMessage(target, msgId, mediaPath, type);
+    } else {
+      result = await sendMessage(target, msgId, content);
+    }
     res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
 
@@ -1387,7 +1567,7 @@ async function handleInternalRequest(url, data, res) {
       return;
     }
 
-    recordHistoryEntry(String(chatId), {
+    logAndRecordHistory(String(chatId), {
       msgId: `out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       userId: 'bot',
       userName: botDisplayName(),

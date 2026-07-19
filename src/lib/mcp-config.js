@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { DATA_DIR, getCredentials } from './config.js';
+import { getCredentials } from './config.js';
 
 const DOC_BIZ_TYPE = 'doc';
 const DEFAULT_DOC_MCP_TYPE = 'streamable-http';
@@ -28,8 +28,10 @@ function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+// Resolved at call time (not import time) so tests that point HOME at a
+// temp dir never write into the real component data directory (issue #15).
 export function resolveWecomDocMcpConfigPath() {
-  return path.join(DATA_DIR, 'wecom-mcp-config.json');
+  return path.join(os.homedir(), 'zylos/components/wecom', 'wecom-mcp-config.json');
 }
 
 export function resolveOpenClawCompatPath() {

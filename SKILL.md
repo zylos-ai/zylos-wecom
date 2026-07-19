@@ -123,7 +123,22 @@ WECOM_BOT_SECRET=your_bot_secret
 
 ### 3. Message Types
 
-Supported outgoing: text, markdown
+Supported outgoing: text, markdown, image, file
+
+**Sending media:** prefix the outbound message with the C4 media convention
+(same as telegram):
+
+```
+[MEDIA:image]/absolute/path/to/picture.png
+[MEDIA:file]/absolute/path/to/report.pdf
+```
+
+Media is uploaded over the long connection in chunks (≤512KB × ≤100 chunks)
+and sent by `media_id`. Size caps: image 10MB, file 20MB (voice 2MB, video
+10MB at the protocol level; not yet exposed via send.js). Both send paths
+support media: the reply path (`aibot_respond_msg`, within 24h of a
+callback) and the proactive path (`aibot_send_msg`). On upload/send failure
+the send fails loudly (exit 1) — there is no silent text fallback.
 
 Supported incoming (varies by chat type):
 
@@ -140,6 +155,12 @@ Supported incoming (varies by chat type):
 - WeCom only pushes group messages where the bot is @-mentioned. Non-@ messages are never delivered.
 - Only `text` and `mixed` types are pushed in group chats. File, voice, video, and standalone image messages are silently dropped by the server.
 
+When a user asks about other platform quirks — why the bot ignores
+someone in a group (visibility scope), why quoted images/files are
+invisible, DM vs group differences, external groups, media size/rate
+limits — read [references/platform-limitations.md](references/platform-limitations.md)
+for the full explanations.
+
 ### 4. Group Context
 
 Group messages forwarded to the agent include a `<group-context>` block with
@@ -149,7 +170,9 @@ bot's own replies — it is the bot's conversation thread, **not** the full
 group discussion. Its value is continuity: the agent sees what was already
 asked and answered in that group instead of treating every mention as a
 cold start. History is kept in memory (last `message.context_messages`
-entries per chat) and does not survive a service restart.
+entries per chat) and dual-written to per-chat JSONL files under
+`history/` in the data directory; after a restart the tail of the file
+is replayed on first access, so context survives service restarts.
 
 Since every context entry was already forwarded to the agent when it
 arrived, attaching it to every message would be pure duplication during a
