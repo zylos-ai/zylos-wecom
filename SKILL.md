@@ -137,11 +137,8 @@ Media is uploaded over the long connection in chunks (≤512KB × ≤100 chunks)
 and sent by `media_id`. Size caps: image 10MB, file 20MB (voice 2MB, video
 10MB at the protocol level; not yet exposed via send.js). Both send paths
 support media: the reply path (`aibot_respond_msg`, within 24h of a
-callback) per official docs, and the proactive path (`aibot_send_msg`)
-**live-verified 2026-07-18** for image and file — the official doc's field
-table claiming markdown/template_card-only for proactive sends is wrong
-(protocol evidence: zylos-wecom#14). On upload/send failure the send fails
-loudly (exit 1) — there is no silent text fallback.
+callback) and the proactive path (`aibot_send_msg`). On upload/send failure
+the send fails loudly (exit 1) — there is no silent text fallback.
 
 Supported incoming (varies by chat type):
 
@@ -161,7 +158,7 @@ Supported incoming (varies by chat type):
   **visibility scope** (可见范围) configured in the WeCom admin console. A
   user outside that scope cannot reach the bot in a group at all.
 
-**Quote limitations (apply to both DM and group, live-verified 2026-07-18):**
+**Quote limitations (apply to both DM and group):**
 - A quoted message carries no sender identity — the bot cannot tell who
   wrote the quoted text.
 - Images/files inside a quote arrive as bare `[image]`/`[file]` tags with
