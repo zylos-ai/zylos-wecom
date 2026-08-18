@@ -84,14 +84,27 @@ The communication channel and office messaging are separate paths:
   WeCom account uses `wecomcli-message` and its current-session restrictions.
 
 Authorization is separate from the WebSocket channel. If
-`wecom-cli auth show --status` reports `unauthorized`, run
-`wecom-cli auth init` and let the user complete the WeCom scan. Never expose
-or copy encrypted CLI credential files, tokens, Bot secrets, or internal IDs.
-Run scan authorization as a managed process so the C4 input pipeline remains
-responsive while the user scans. The component install/upgrade hook owns CLI
-installation. If the binary is missing or below the required version during a
-normal business request, obtain the required component-change confirmation
-before installing or upgrading it.
+`wecom-cli auth show --status` reports `unauthorized`, use this WeCom-only
+authorization flow:
+
+1. Authorization may be started only from a private WeCom DM sent by the
+   configured owner. Never authorize from a group or for a non-owner. Ask the
+   owner to DM the bot when an unauthorized request originates in a group.
+2. Run `node scripts/wecom-cli-auth.js --endpoint <exact-wecom-reply-endpoint>`
+   as a managed process. The helper validates the owner DM before starting the
+   official CLI, keeps C4 responsive, returns the temporary official link and
+   PNG through that exact WeCom endpoint, and polls for up to five minutes.
+3. A successful helper result is JSON with `status: "authorized"` and
+   `retryOriginalOperation: true`. Retry the original office operation once.
+   On expiry or failure, report the helper's safe error and wait for the owner
+   to retry; do not loop or route authorization through another channel.
+
+Never expose or copy encrypted CLI credential files, tokens, Bot secrets, or
+internal IDs. The component install/upgrade hook owns CLI installation. If the
+binary is missing or below the required version during a normal business
+request, obtain the required component-change confirmation before installing
+or upgrading it. Until a separately enforced office-access policy exists,
+execute token-backed CLI office operations only for the configured owner.
 
 ## Sending Messages
 

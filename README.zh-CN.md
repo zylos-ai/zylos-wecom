@@ -91,6 +91,17 @@ wecom-cli auth init
 
 凭证由官方 CLI 加密保存，不会复制到组件配置中。
 
+从企业微信会话发起授权时，只允许已绑定 owner 的企业微信私聊。Agent 在后台
+保持 CLI 授权进程运行，并把官方临时链接和二维码图片回复到同一个企业微信
+私聊；不得发送到群聊或其他通信渠道。扫码后必须验证状态为 `authorized`，
+再自动重试原办公请求。
+
+Agent 使用以下 helper 完成整个授权会话：
+
+```bash
+node scripts/wecom-cli-auth.js --endpoint '<原企业微信回复 endpoint>'
+```
+
 ## 配置
 
 ### 配置文件

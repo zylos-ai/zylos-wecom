@@ -1,0 +1,260 @@
+import fs from 'fs';
+import path from 'path';
+import { execFileSync, spawn } from 'child_process';
+
+import { DATA_DIR } from './config.js';
+
+const AUTH_PAGE_ORIGIN = 'https://work.weixin.qq.com';
+const AUTH_PAGE_PATH = '/ai/qc/gen';
+const SESSION_TTL_MS = 6 * 60 * 1000;
+
+export class WecomCliAuthFlowError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'WecomCliAuthFlowError';
+    this.code = code;
+  }
+}
+
+export function parseWecomReplyEndpoint(endpoint) {
+  if (typeof endpoint !== 'string' || endpoint.length > 1024) {
+    throw new WecomCliAuthFlowError('invalid_endpoint', 'A WeCom reply endpoint is required');
+  }
+
+  const parts = endpoint.split('|');
+  const userId = parts.shift();
+  if (!userId || /[\s\x00-\x1f]/.test(userId)) {
+    throw new WecomCliAuthFlowError('invalid_endpoint', 'Invalid WeCom endpoint user');
+  }
+
+  const parsed = { userId, type: '', msg: '' };
+  const seen = new Set();
+  for (const part of parts) {
+    const separator = part.indexOf(':');
+    if (separator < 1) {
+      throw new WecomCliAuthFlowError('invalid_endpoint', 'Invalid WeCom endpoint field');
+    }
+    const key = part.slice(0, separator);
+    const value = part.slice(separator + 1);
+    if (!['type', 'msg'].includes(key) || seen.has(key) || !value) {
+      throw new WecomCliAuthFlowError('invalid_endpoint', 'Invalid WeCom endpoint field');
+    }
+    if (/[\r\n\x00]/.test(value)) {
+      throw new WecomCliAuthFlowError('invalid_endpoint', 'Invalid WeCom endpoint value');
+    }
+    seen.add(key);
+    parsed[key] = value;
+  }
+
+  if (parsed.type !== 'p2p' || !parsed.msg) {
+    throw new WecomCliAuthFlowError(
+      'owner_dm_required',
+      'CLI authorization requires an originating WeCom private message'
+    );
+  }
+  return parsed;
+}
+
+export function assertOwnerDm(endpoint, config) {
+  const parsed = parseWecomReplyEndpoint(endpoint);
+  if (!config?.owner?.bound || String(config.owner.user_id) !== parsed.userId) {
+    throw new WecomCliAuthFlowError(
+      'owner_dm_required',
+      'CLI authorization is restricted to the configured WeCom owner'
+    );
+  }
+  return parsed;
+}
+
+export function extractWecomAuthPageUrl(output) {
+  const matches = String(output || '').match(/https:\/\/work\.weixin\.qq\.com\/ai\/qc\/gen\?[^\s]+/g);
+  if (!matches) return null;
+
+  for (const candidate of matches) {
+    try {
+      const url = new URL(candidate);
+      if (url.origin === AUTH_PAGE_ORIGIN && url.pathname === AUTH_PAGE_PATH) {
+        return url.toString();
+      }
+    } catch {
+      // Ignore malformed diagnostic text.
+    }
+  }
+  return null;
+}
+
+export function sendWecomC4(endpoint, message, options = {}) {
+  const spawnImpl = options.spawnImpl || spawn;
+  const c4SendPath = options.c4SendPath || path.join(
+    process.env.HOME || '',
+    'zylos/.claude/skills/comm-bridge/scripts/c4-send.js'
+  );
+
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl('node', [c4SendPath, 'wecom', endpoint], {
+      stdio: ['pipe', 'ignore', 'pipe']
+    });
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-4000);
+    });
+    child.on('error', () => {
+      reject(new WecomCliAuthFlowError('delivery_failed', 'Unable to start C4 delivery'));
+    });
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new WecomCliAuthFlowError(
+        'delivery_failed',
+        `WeCom delivery failed${stderr ? `: ${stderr.trim()}` : ''}`
+      ));
+    });
+    child.stdin.end(String(message));
+  });
+}
+
+export function runOfficialWecomCliAuth(options) {
+  const spawnImpl = options.spawnImpl || spawn;
+  const qrFileName = path.basename(options.qrPath);
+
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl('wecom-cli', [
+      'auth',
+      'init',
+      '--noninteractive',
+      '--no-browser',
+      '--output-qrcode',
+      qrFileName
+    ], {
+      cwd: options.cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let output = '';
+    let pageUrl = null;
+    let qrReady = false;
+    let deliveryPromise = null;
+
+    const maybeDeliver = () => {
+      if (deliveryPromise || !pageUrl || !qrReady || !fs.existsSync(options.qrPath)) return;
+      deliveryPromise = Promise.resolve().then(
+        () => options.onReady({ pageUrl, qrPath: options.qrPath })
+      );
+      deliveryPromise.catch(() => child.kill());
+    };
+
+    const consume = (chunk) => {
+      output = `${output}${chunk}`.slice(-32768);
+      pageUrl = pageUrl || extractWecomAuthPageUrl(output);
+      if (output.includes('二维码已保存到:')) qrReady = true;
+      maybeDeliver();
+    };
+
+    child.stdout.on('data', consume);
+    child.stderr.on('data', consume);
+    child.on('error', () => {
+      reject(new WecomCliAuthFlowError('cli_start_failed', 'Unable to start wecom-cli auth'));
+    });
+    child.on('close', async (code) => {
+      try {
+        if (deliveryPromise) await deliveryPromise;
+        if (code !== 0) {
+          throw new WecomCliAuthFlowError(
+            code === 1 ? 'auth_failed_or_expired' : 'cli_failed',
+            'WeCom CLI authorization did not complete'
+          );
+        }
+        if (!deliveryPromise) {
+          throw new WecomCliAuthFlowError(
+            'auth_material_missing',
+            'wecom-cli did not produce authorization material'
+          );
+        }
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+export function checkWecomCliAuthStatus(exec = execFileSync) {
+  const output = exec('wecom-cli', ['auth', 'show', '--status'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  }).trim();
+  return output === 'authorized';
+}
+
+function acquireLock(rootDir, now = Date.now()) {
+  fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(rootDir, 0o700);
+  const lockPath = path.join(rootDir, 'active.lock');
+
+  const open = () => {
+    const fd = fs.openSync(lockPath, 'wx', 0o600);
+    fs.writeFileSync(fd, `${process.pid} ${now}\n`);
+    fs.closeSync(fd);
+  };
+
+  try {
+    open();
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const age = now - fs.statSync(lockPath).mtimeMs;
+    if (age <= SESSION_TTL_MS) {
+      throw new WecomCliAuthFlowError('auth_in_progress', 'A WeCom CLI auth session is already active');
+    }
+    fs.unlinkSync(lockPath);
+    open();
+  }
+
+  return lockPath;
+}
+
+export async function authorizeWecomCli(options) {
+  const endpoint = options.endpoint;
+  assertOwnerDm(endpoint, options.config);
+
+  const rootDir = options.tempRoot || path.join(DATA_DIR, 'cli-auth');
+  const lockPath = acquireLock(rootDir, options.now);
+  let sessionDir = null;
+  const sendMessage = options.sendMessage || sendWecomC4;
+  const runAuth = options.runAuth || runOfficialWecomCliAuth;
+  const checkStatus = options.checkStatus || checkWecomCliAuthStatus;
+
+  try {
+    sessionDir = fs.mkdtempSync(path.join(rootDir, 'session-'));
+    fs.chmodSync(sessionDir, 0o700);
+    const qrPath = path.join(sessionDir, 'qrcode.png');
+    await runAuth({
+      cwd: sessionDir,
+      qrPath,
+      onReady: async ({ pageUrl, qrPath: readyQrPath }) => {
+        await sendMessage(
+          endpoint,
+          `企业微信 CLI 需要 owner 授权。请在 5 分钟内打开官方链接确认：\n${pageUrl}`
+        );
+        await sendMessage(endpoint, `[MEDIA:image]${readyQrPath}`);
+      }
+    });
+
+    if (!checkStatus()) {
+      throw new WecomCliAuthFlowError('status_not_authorized', 'wecom-cli did not report authorized');
+    }
+
+    await sendMessage(endpoint, '企业微信 CLI 授权成功，正在重试刚才的操作。');
+    return { ok: true, status: 'authorized', retryOriginalOperation: true };
+  } catch (error) {
+    if (error.code !== 'delivery_failed') {
+      await sendMessage(
+        endpoint,
+        '企业微信 CLI 授权未完成或已超时。需要时请在当前私聊重新发起。'
+      ).catch(() => {});
+    }
+    throw error;
+  } finally {
+    if (sessionDir) fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(lockPath, { force: true });
+  }
+}

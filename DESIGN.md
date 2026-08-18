@@ -48,6 +48,19 @@ The component lifecycle hooks install a pinned minimum CLI version. The CLI's
 own encrypted authorization store remains separate from the channel's Bot ID
 and Secret; the component never copies or reimplements CLI credentials.
 
+CLI authorization is a WeCom-native owner-DM flow. The Agent starts the
+`scripts/wecom-cli-auth.js` helper as a managed process. The helper validates
+the structured endpoint against the bound owner before it starts the official
+QR command, then sends the temporary official link and PNG back through the
+exact C4 reply path of the originating WeCom DM. A process lock prevents
+overlapping authorization sessions and private temporary files are removed
+when the helper finishes.
+Authorization material must never be sent to a group or another channel. A
+successful scan is followed by an explicit `auth show --status` check before
+the original operation is retried. Because the resulting CLI token is shared
+at the runtime level, office operations default to the configured owner only;
+broader access requires a separately enforced policy.
+
 The source package includes both upstream Skill layouts. The 14 modular CLI
 skills are authoritative for execution details. The Unified snapshot is used
 for aggregate intent routing and cross-domain workflows; overlapping command
@@ -143,7 +156,9 @@ First private message sender becomes the owner:
 | `src/admin.js` | Configuration management CLI |
 | `src/lib/config.js` | Config loader with hot-reload |
 | `src/lib/wecom-cli-bridge.js` | Shell-free official CLI invocation and typed auth errors |
+| `src/lib/wecom-cli-auth.js` | Owner-DM CLI authorization orchestration and C4 delivery |
 | `scripts/send.js` | C4 outbound interface |
+| `scripts/wecom-cli-auth.js` | Agent-facing managed CLI authorization entry point |
 | `hooks/` | Install/upgrade lifecycle hooks, including pinned CLI setup |
 | `references/wecom-cli/` | Authoritative 14-domain official CLI Skill snapshot |
 | `references/wecom-unified/` | Aggregate official Unified Skill snapshot |

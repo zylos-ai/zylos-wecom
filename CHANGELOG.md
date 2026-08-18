@@ -12,6 +12,11 @@
   compatibility path when both can serve the same operation
 - Updated `ws` to 8.21.3 to address the memory exhaustion and uninitialized
   memory disclosure advisories affecting earlier 8.x releases
+- Defined CLI authorization as an owner-only WeCom DM flow that returns the
+  temporary link and QR image through the originating C4 reply path
+- Added a managed CLI authorization helper with endpoint/owner validation,
+  single-session locking, C4 link/image delivery, status verification, safe
+  failure messages, and private temporary-file cleanup
 
 ## [0.1.5] - 2026-07-19
 

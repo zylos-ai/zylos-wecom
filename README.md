@@ -94,6 +94,19 @@ wecom-cli auth init
 The second command displays a WeCom QR code. Credentials are encrypted by the
 official CLI and are not copied into the component configuration.
 
+When authorization is initiated from a WeCom conversation, it is restricted
+to the configured owner's private DM. The Agent keeps the CLI process running
+in the background and sends the temporary official link and QR image back to
+that same WeCom DM. Authorization material is never sent to groups or another
+communication channel. After the scan, the Agent verifies `authorized` before
+retrying the original office request.
+
+The Agent-facing helper is:
+
+```bash
+node scripts/wecom-cli-auth.js --endpoint '<original-wecom-reply-endpoint>'
+```
+
 ## Configuration
 
 ### Config File

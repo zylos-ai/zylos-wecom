@@ -90,13 +90,20 @@ export function verifyBundledWecomSkills(skillDir) {
   );
   const unified = path.join(skillDir, 'references', 'wecom-unified', 'SKILL.md');
   if (!fs.existsSync(unified)) missing.push('wecom-unified');
+  const integrationFiles = [
+    'scripts/wecom-cli-auth.js',
+    'src/lib/wecom-cli-auth.js'
+  ];
+  for (const file of integrationFiles) {
+    if (!fs.existsSync(path.join(skillDir, file))) missing.push(file);
+  }
 
   if (missing.length > 0) {
     throw new Error(`bundled WeCom skills are incomplete: ${missing.join(', ')}`);
   }
 
   console.log(
-    `${LOG_PREFIX} verified ${EXPECTED_CLI_SKILLS.length} CLI skills and Unified router`
+    `${LOG_PREFIX} verified ${EXPECTED_CLI_SKILLS.length} CLI skills, Unified router, and auth helper`
   );
   return { cliSkills: EXPECTED_CLI_SKILLS.length, unified: true };
 }

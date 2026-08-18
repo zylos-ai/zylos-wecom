@@ -31,6 +31,16 @@ test('package and lockfile require the patched ws release', () => {
   assert.equal(lock.packages['node_modules/ws'].version, '8.21.3');
 });
 
+test('root skill keeps CLI authorization in the originating WeCom owner DM', () => {
+  const skill = fs.readFileSync(path.join(root, 'SKILL.md'), 'utf8');
+
+  assert.match(skill, /private WeCom DM sent by the\s+configured owner/);
+  assert.match(skill, /scripts\/wecom-cli-auth\.js --endpoint/);
+  assert.match(skill, /returns the temporary official link and\s+PNG through that exact WeCom endpoint/);
+  assert.match(skill, /do not loop or route authorization through another channel/);
+  assert.match(skill, /execute token-backed CLI office operations only for the configured owner/);
+});
+
 test('semverCompare handles older, equal, and newer versions', () => {
   assert.equal(semverCompare('1.0.9', '1.1.0'), -1);
   assert.equal(semverCompare('1.1.0', '1.1.0'), 0);
@@ -80,6 +90,8 @@ test('all modular CLI skills and the Unified router are bundled', () => {
   assert.ok(
     fs.existsSync(path.join(root, 'references', 'wecom-unified', 'references'))
   );
+  assert.ok(fs.existsSync(path.join(root, 'scripts', 'wecom-cli-auth.js')));
+  assert.ok(fs.existsSync(path.join(root, 'src', 'lib', 'wecom-cli-auth.js')));
 });
 
 test('bundled skill markdown has no broken relative file links', () => {
