@@ -17,6 +17,13 @@
 - Added a managed CLI authorization helper with endpoint/owner validation,
   single-session locking, C4 link/image delivery, status verification, safe
   failure messages, and private temporary-file cleanup
+- Added a fail-closed office-message route guard: code callers must declare an
+  explicit office-message intent before entering the CLI `message` domain;
+  channel replies/proactive C4 sends remain on `scripts/send.js`, and mixed
+  routing emits `WECOM_CLI_ROUTE_VIOLATION`
+- Clarified that component hooks and the owner-DM helper override vendored
+  generic CLI install/authorization bootstrap instructions while preserving
+  the upstream snapshots unchanged
 
 ## [0.1.5] - 2026-07-19
 

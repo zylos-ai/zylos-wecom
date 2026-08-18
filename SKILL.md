@@ -82,6 +82,18 @@ The communication channel and office messaging are separate paths:
   continue through `scripts/send.js` and the WebSocket service.
 - An explicit user request to send an office message through the authorized
   WeCom account uses `wecomcli-message` and its current-session restrictions.
+- Code callers must invoke the `message` CLI domain through
+  `src/lib/wecom-cli-bridge.js` with intent `explicit-office-message`. The
+  bridge rejects the call and emits `WECOM_CLI_ROUTE_VIOLATION` otherwise.
+  Never mark a channel reply or normal proactive C4 send with that intent.
+
+This component-level integration policy overrides the vendored Skills only for
+CLI lifecycle and authorization. Do not run their generic
+`npm install -g @wecom/cli` or blocking `wecom-cli auth init` instructions.
+The component install/upgrade hook exclusively owns the pinned CLI binary, and
+the managed owner-DM helper below exclusively owns authorization. The vendored
+domain commands, parameters, safety checks, and output rules remain
+authoritative for office operations.
 
 Authorization is separate from the WebSocket channel. If
 `wecom-cli auth show --status` reports `unauthorized`, use this WeCom-only

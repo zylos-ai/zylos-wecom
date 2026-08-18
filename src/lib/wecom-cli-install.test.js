@@ -39,6 +39,23 @@ test('root skill keeps CLI authorization in the originating WeCom owner DM', () 
   assert.match(skill, /returns the temporary official link and\s+PNG through that exact WeCom endpoint/);
   assert.match(skill, /do not loop or route authorization through another channel/);
   assert.match(skill, /execute token-backed CLI office operations only for the configured owner/);
+  assert.match(skill, /WECOM_CLI_ROUTE_VIOLATION/);
+  assert.match(skill, /Do not run their generic\s+`npm install -g @wecom\/cli`/);
+  assert.match(skill, /install\/upgrade hook exclusively owns the pinned CLI binary/);
+});
+
+test('channel sender stays on the internal WebSocket path, not the office CLI', () => {
+  const sender = fs.readFileSync(path.join(root, 'scripts', 'send.js'), 'utf8');
+
+  assert.match(sender, /\/internal\/send/);
+  assert.doesNotMatch(sender, /runWecomCli|wecom-cli/);
+});
+
+test('upstream snapshots document the component lifecycle override', () => {
+  const upstream = fs.readFileSync(path.join(root, 'references', 'UPSTREAM.md'), 'utf8');
+
+  assert.match(upstream, /Generic upstream instructions to run\s+`npm install -g @wecom\/cli`/);
+  assert.match(upstream, /managed owner-DM\s+authorization helper owns QR authorization/);
 });
 
 test('semverCompare handles older, equal, and newer versions', () => {

@@ -44,9 +44,19 @@ The component has two independent WeCom data planes:
   as contacts, documents, sheets, calendars, meetings, todos, disk, email,
   office messages, and media.
 
+The office-message overlap is fail-closed. Code callers using
+`src/lib/wecom-cli-bridge.js` may enter the CLI `message` domain only with the
+`explicit-office-message` intent. Missing or different intent throws and logs
+`WECOM_CLI_ROUTE_VIOLATION`; channel replies and normal proactive C4 messages
+remain on `scripts/send.js` and never receive that intent.
+
 The component lifecycle hooks install a pinned minimum CLI version. The CLI's
 own encrypted authorization store remains separate from the channel's Bot ID
 and Secret; the component never copies or reimplements CLI credentials.
+Vendored upstream Skills remain unmodified snapshots. Their generic direct
+install and blocking authorization bootstrap text is superseded by the root
+component Skill: lifecycle hooks own installation and the managed owner-DM
+helper owns authorization.
 
 CLI authorization is a WeCom-native owner-DM flow. The Agent starts the
 `scripts/wecom-cli-auth.js` helper as a managed process. The helper validates

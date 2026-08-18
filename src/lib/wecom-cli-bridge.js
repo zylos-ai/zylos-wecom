@@ -1,6 +1,10 @@
 import { execFileSync } from 'child_process';
 
 const AUTH_ERROR_CODE = 893201;
+const OFFICE_MESSAGE_COMMAND = 'message';
+const ROUTE_LOG_PREFIX = '[zylos-wecom]';
+
+export const EXPLICIT_OFFICE_MESSAGE_INTENT = 'explicit-office-message';
 
 export class WecomCliAuthRequiredError extends Error {
   constructor(errorInfo, originalError) {
@@ -8,6 +12,17 @@ export class WecomCliAuthRequiredError extends Error {
     this.name = 'WecomCliAuthRequiredError';
     this.errorInfo = errorInfo;
     this.originalError = originalError;
+  }
+}
+
+export class WecomCliRouteViolationError extends Error {
+  constructor() {
+    super(
+      'wecom-cli message commands require an explicit office-message request; ' +
+      'use scripts/send.js for channel replies and proactive channel messages'
+    );
+    this.name = 'WecomCliRouteViolationError';
+    this.code = 'WECOM_CLI_ROUTE_VIOLATION';
   }
 }
 
@@ -46,7 +61,22 @@ export function runWecomCli(args, options = {}) {
     throw new TypeError('runWecomCli: args must be an array of strings');
   }
 
-  const { exec = execFileSync, ...execOptions } = options;
+  const {
+    exec = execFileSync,
+    intent,
+    onRouteViolation = console.warn,
+    ...execOptions
+  } = options;
+
+  if (
+    args[0] === OFFICE_MESSAGE_COMMAND &&
+    intent !== EXPLICIT_OFFICE_MESSAGE_INTENT
+  ) {
+    const error = new WecomCliRouteViolationError();
+    onRouteViolation(`${ROUTE_LOG_PREFIX} ${error.code}: ${error.message}`);
+    throw error;
+  }
+
   try {
     return exec('wecom-cli', args, {
       encoding: 'utf8',

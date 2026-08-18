@@ -11,3 +11,14 @@ The modular `wecom-cli` skills are authoritative wherever the snapshots
 overlap. The Unified snapshot supplies aggregate intent routing and
 cross-domain orchestration guidance. Each snapshot retains its upstream MIT
 license file.
+
+## Integration-policy override
+
+The snapshots are preserved for provenance and are not the component lifecycle
+authority. Generic upstream instructions to run
+`npm install -g @wecom/cli` or blocking `wecom-cli auth init` must not be
+executed by this component. The root `SKILL.md` overrides those two steps: the
+component install/upgrade hook owns the pinned binary, and the managed owner-DM
+authorization helper owns QR authorization. Domain commands, parameters,
+safety checks, and output rules continue to come from the vendored modular
+Skills.

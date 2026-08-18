@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  EXPLICIT_OFFICE_MESSAGE_INTENT,
   parseWecomCliError,
   runWecomCli,
-  WecomCliAuthRequiredError
+  WecomCliAuthRequiredError,
+  WecomCliRouteViolationError
 } from './wecom-cli-bridge.js';
 
 test('parseWecomCliError reads a structured error after diagnostics', () => {
@@ -47,6 +49,51 @@ test('runWecomCli passes argv without a shell', () => {
     'Alice; rm -rf /'
   ]);
   assert.equal(invocation.options.shell, undefined);
+});
+
+test('runWecomCli allows office messages only with explicit intent', () => {
+  let invocation;
+  const output = runWecomCli(
+    ['message', 'aibot', 'send', '--json', '{"msg_type":"markdown"}'],
+    {
+      intent: EXPLICIT_OFFICE_MESSAGE_INTENT,
+      exec(command, args) {
+        invocation = { command, args };
+        return '{"errcode":0}';
+      }
+    }
+  );
+
+  assert.equal(output, '{"errcode":0}');
+  assert.equal(invocation.command, 'wecom-cli');
+  assert.deepEqual(invocation.args.slice(0, 3), ['message', 'aibot', 'send']);
+});
+
+test('runWecomCli rejects office-message routing without explicit intent', () => {
+  const warnings = [];
+  let executed = false;
+
+  assert.throws(
+    () => runWecomCli(['message', 'aibot', 'send', '--json', '{}'], {
+      exec() {
+        executed = true;
+        return '';
+      },
+      onRouteViolation(message) {
+        warnings.push(message);
+      }
+    }),
+    (error) => {
+      assert.ok(error instanceof WecomCliRouteViolationError);
+      assert.equal(error.code, 'WECOM_CLI_ROUTE_VIOLATION');
+      assert.match(error.message, /scripts\/send\.js/);
+      return true;
+    }
+  );
+
+  assert.equal(executed, false);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /WECOM_CLI_ROUTE_VIOLATION/);
 });
 
 test('runWecomCli converts authorization failures to a typed error', () => {
