@@ -145,13 +145,29 @@ First private message sender becomes the owner:
 
 1. WebSocket receives `aibot_msg_callback` JSON frame
 2. Extract: msgId, chatType, from.userid, msgtype, content
-3. Deduplicate by msgId (10-minute TTL)
+3. Suppress delivered msgIds; recover pending msgIds (10-minute delivered TTL)
 4. Track reqId for reply (5-minute TTL)
 5. Check permissions (DM policy / group policy)
 6. Auto-bind owner if first DM
 7. Cache sender name if available
-8. Record to in-memory history
-9. Format as C4 message and forward via c4-receive.js
+8. Replay existing history and format the C4 message
+9. Persist a `pending` delivery record keyed by the stable WeCom `body.msgid`
+10. Forward to C4
+11. Append channel history, then persist `delivered`
+
+### Restart delivery boundary
+
+The delivery journal separates receipt from confirmed C4 acceptance. Pending
+records are retried in receive order at startup; only delivered records are
+suppressed during the 10-minute retry-safe window. Persistence and forwarding
+failures are logged and remain pending rather than being silently discarded.
+
+C4 currently has no inbound idempotency key. If the process exits after C4 has
+accepted a message but before the delivered marker is durably appended, startup
+recovery forwards that stable `msgid` again. This narrow acknowledgement gap is
+an explicit at-least-once boundary until C4 adds consumer-side `msgid`
+idempotency; the component logs the ambiguous state instead of claiming
+end-to-end exactly-once delivery.
 
 ### Outgoing Message
 

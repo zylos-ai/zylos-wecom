@@ -243,6 +243,15 @@ entries per chat) and dual-written to per-chat JSONL files under
 `history/` in the data directory; after a restart the tail of the file
 is replayed on first access, so context survives service restarts.
 
+Inbound C4 delivery state is stored separately in `message-delivery.jsonl`.
+The component durably records `pending` before forwarding and records
+`delivered` only after C4 accepts the message and channel history is written.
+Pending records are retried in order at startup; only delivered `body.msgid`
+values are suppressed within the 10-minute retry window. C4 does not currently
+provide an inbound idempotency key, so a process exit after C4 acceptance but
+before the local delivered marker can cause one observable duplicate forward.
+This is an explicit at-least-once boundary, not an exactly-once guarantee.
+
 Since every context entry was already forwarded to the agent when it
 arrived, attaching it to every message would be pure duplication during a
 live exchange. The block is therefore **idle-gated**: it is attached only

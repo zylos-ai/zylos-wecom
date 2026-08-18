@@ -52,13 +52,14 @@ test('channel sender stays on the internal WebSocket path, not the office CLI', 
   assert.doesNotMatch(sender, /runWecomCli|wecom-cli/);
 });
 
-test('server records the exact owner DM reply endpoint before forwarding to C4', () => {
+test('server records the exact owner DM reply endpoint before durable C4 delivery', () => {
   const server = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
 
   assert.match(
     server,
-    /const endpoint = `\$\{fromUser\}\|type:p2p\|msg:\$\{msgId\}`;[\s\S]*?recordOwnerReplyEndpoint\(endpoint, config\);[\s\S]*?forwardToC4\(formattedMessage, endpoint\);/
+    /endpoint = `\$\{fromUser\}\|type:p2p\|msg:\$\{msgId\}`;[\s\S]*?recordOwnerReplyEndpoint\(endpoint, config\);[\s\S]*?messageDeliveryOutbox\.enqueue\(\{[\s\S]*?endpoint,[\s\S]*?\}\);[\s\S]*?scheduleOutboxDelivery\(queued\.record\);/
   );
+  assert.match(server, /forward: \(entry\) => forwardToC4\(entry\.content, entry\.endpoint\)/);
 });
 
 test('upstream snapshots document the component lifecycle override', () => {
