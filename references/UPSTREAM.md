@@ -22,3 +22,23 @@ component install/upgrade hook owns the pinned binary, and the managed owner-DM
 authorization helper owns QR authorization. Domain commands, parameters,
 safety checks, and output rules continue to come from the vendored modular
 Skills.
+
+The component-specific policy is declared as a known override in
+`wecom-vendor-manifest.json`. Override paths must remain outside both vendored
+roots, so an override cannot hide an upstream file change.
+
+## Drift detection
+
+Run the offline, read-only integrity check after changing a pin or any vendored
+file:
+
+```bash
+npm run check:wecom-vendor
+```
+
+The manifest records every expected path and SHA-256 digest for both pinned
+snapshots. The check fails on a package pin mismatch, a modified or missing
+file, an unexpected file, an invalid override, or a missing override policy
+file. Install and upgrade hooks run the same verification before accepting the
+bundled Skills. The check never downloads or rewrites upstream content; an
+intentional snapshot refresh requires an explicit pin and manifest update.

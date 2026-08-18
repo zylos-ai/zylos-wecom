@@ -3,6 +3,8 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
+import { verifyWecomVendorIntegrity } from '../src/lib/wecom-vendor-integrity.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FALLBACK_VERSION = '1.1.0';
 const WECOM_CLI_PACKAGE = '@wecom/cli';
@@ -102,8 +104,10 @@ export function verifyBundledWecomSkills(skillDir) {
     throw new Error(`bundled WeCom skills are incomplete: ${missing.join(', ')}`);
   }
 
+  const integrity = verifyWecomVendorIntegrity(skillDir);
+
   console.log(
-    `${LOG_PREFIX} verified ${EXPECTED_CLI_SKILLS.length} CLI skills, Unified router, and auth helper`
+    `${LOG_PREFIX} verified ${EXPECTED_CLI_SKILLS.length} CLI skills, Unified router, auth helper, and ${integrity.snapshots.length} pinned snapshots`
   );
   return { cliSkills: EXPECTED_CLI_SKILLS.length, unified: true };
 }
