@@ -10,6 +10,8 @@
 ### Changed
 - Official CLI capabilities now take precedence over the legacy document MCP
   compatibility path when both can serve the same operation
+- Updated `ws` to 8.21.3 to address the memory exhaustion and uninitialized
+  memory disclosure advisories affecting earlier 8.x releases
 
 ## [0.1.5] - 2026-07-19
 

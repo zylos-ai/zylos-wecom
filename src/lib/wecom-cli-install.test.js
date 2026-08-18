@@ -20,6 +20,17 @@ test('package pins the supported official CLI version', () => {
   assert.equal(getTargetWecomCliVersion(), '1.1.0');
 });
 
+test('package and lockfile require the patched ws release', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const lock = JSON.parse(
+    fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8')
+  );
+
+  assert.equal(pkg.dependencies.ws, '^8.21.3');
+  assert.equal(lock.packages[''].dependencies.ws, '^8.21.3');
+  assert.equal(lock.packages['node_modules/ws'].version, '8.21.3');
+});
+
 test('semverCompare handles older, equal, and newer versions', () => {
   assert.equal(semverCompare('1.0.9', '1.1.0'), -1);
   assert.equal(semverCompare('1.1.0', '1.1.0'), 0);

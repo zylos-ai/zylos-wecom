@@ -31,7 +31,7 @@
   "dependencies": {
     "dotenv": "^16.4.5",
     "qrcode": "^1.5.4",
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "wecomCli": {
     "package": "@wecom/cli",
