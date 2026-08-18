@@ -32,5 +32,11 @@
     "dotenv": "^16.4.5",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0"
+  },
+  "wecomCli": {
+    "package": "@wecom/cli",
+    "version": "1.1.0",
+    "skillsCommit": "1d9e74026455a85d8d10a917b4d453ed4b9a829e",
+    "unifiedCommit": "2620033fdb2721fb192ac06a6a0510987035d203"
   }
 }

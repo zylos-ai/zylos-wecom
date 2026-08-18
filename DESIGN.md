@@ -34,6 +34,25 @@ WeCom Servers --> User
 
 ## Key Design Decisions
 
+### Communication Channel vs Office CLI
+
+The component has two independent WeCom data planes:
+
+- The long-running WebSocket service handles incoming conversations, C4
+  routing, replies, and normal proactive channel messages.
+- The official `wecom-cli` handles account-authorized office operations such
+  as contacts, documents, sheets, calendars, meetings, todos, disk, email,
+  office messages, and media.
+
+The component lifecycle hooks install a pinned minimum CLI version. The CLI's
+own encrypted authorization store remains separate from the channel's Bot ID
+and Secret; the component never copies or reimplements CLI credentials.
+
+The source package includes both upstream Skill layouts. The 14 modular CLI
+skills are authoritative for execution details. The Unified snapshot is used
+for aggregate intent routing and cross-domain workflows; overlapping command
+guidance always resolves to the modular CLI skill.
+
 ### WebSocket Long Connection (vs HTTP Callback)
 
 Chose WebSocket mode because:
@@ -123,8 +142,11 @@ First private message sender becomes the owner:
 | `src/index.js` | WebSocket client, message processing, internal API |
 | `src/admin.js` | Configuration management CLI |
 | `src/lib/config.js` | Config loader with hot-reload |
+| `src/lib/wecom-cli-bridge.js` | Shell-free official CLI invocation and typed auth errors |
 | `scripts/send.js` | C4 outbound interface |
-| `hooks/` | Install/upgrade lifecycle hooks |
+| `hooks/` | Install/upgrade lifecycle hooks, including pinned CLI setup |
+| `references/wecom-cli/` | Authoritative 14-domain official CLI Skill snapshot |
+| `references/wecom-unified/` | Aggregate official Unified Skill snapshot |
 
 ## Configuration
 

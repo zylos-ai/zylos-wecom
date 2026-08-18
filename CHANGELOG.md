@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Pinned official `wecom-cli` install/upgrade integration with version checks
+- Fourteen modular official CLI skills and the WeCom Unified aggregate router
+- Shell-free CLI bridge with typed authorization errors and focused tests
+
+### Changed
+- Official CLI capabilities now take precedence over the legacy document MCP
+  compatibility path when both can serve the same operation
+
 ## [0.1.5] - 2026-07-19
 
 ### Added

@@ -10,10 +10,19 @@
  * - Create subdirectories (logs, media)
  * - Create default config.json
  * - Check for environment variables (informational)
+ * - Verify bundled office skills and install the pinned official wecom-cli
  */
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import {
+  installWecomCliBinary,
+  verifyBundledWecomSkills
+} from './wecom-cli-shared.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SKILL_DIR = path.resolve(__dirname, '..');
 
 const HOME = process.env.HOME;
 const DATA_DIR = path.join(HOME, 'zylos/components/wecom');
@@ -88,6 +97,11 @@ if (missing.length > 0) {
 } else {
   console.log('  All required credentials found.');
 }
+
+// 4. Install the official office CLI and validate the bundled skill routers.
+console.log('\nEnsuring official wecom-cli integration...');
+verifyBundledWecomSkills(SKILL_DIR);
+installWecomCliBinary();
 
 console.log('\n[post-install] Complete!');
 

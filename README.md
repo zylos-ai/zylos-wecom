@@ -28,6 +28,9 @@
 - **Admin CLI** -- Configuration management without manual JSON editing
 - **Hot Reload** -- Config changes take effect without restart (most settings)
 - **Doc MCP Bootstrap** -- Best-effort fetch and persistence of WeCom doc MCP config after WS auth
+- **Official Office CLI** -- Installs the pinned official `wecom-cli` and bundles
+  its 14 modular skills plus the WeCom Unified router for contacts, documents,
+  sheets, calendar, meetings, todos, disk, email, messages, and media
 
 ## Prerequisites
 
@@ -77,6 +80,19 @@ pm2 logs zylos-wecom
 ### 5. Test
 
 Send a message to your WeCom bot. The first private message sender becomes the owner.
+
+### 6. Authorize Office Capabilities
+
+The communication channel and office CLI use separate authorization stores.
+Before the first office operation, authorize the CLI once:
+
+```bash
+wecom-cli auth show --status
+wecom-cli auth init
+```
+
+The second command displays a WeCom QR code. Credentials are encrypted by the
+official CLI and are not copied into the component configuration.
 
 ## Configuration
 

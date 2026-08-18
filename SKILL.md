@@ -9,7 +9,10 @@ description: >-
   (3) managing DM access control (dmPolicy: open/allowlist/owner, dmAllowFrom list),
   (4) managing group access control (groupPolicy, per-group allowFrom),
   (5) configuring the bot (admin CLI, markdown settings),
-  (6) troubleshooting WeCom connection or message delivery issues.
+  (6) troubleshooting WeCom connection or message delivery issues,
+  (7) using the official WeCom CLI for contacts, documents, sheets,
+  smart sheets, smart pages, calendar, meetings, todos, disk, email,
+  office messages, and media operations.
   Config at ~/zylos/components/wecom/config.json. Service: pm2 zylos-wecom.
 type: communication
 
@@ -53,6 +56,42 @@ WeCom (企业微信) communication channel for zylos.
 Uses WebSocket long connection mode (智能机器人长连接) — no public IP, no SSL, no callback URL needed.
 
 Depends on: comm-bridge (C4 message routing).
+
+## Official WeCom CLI
+
+Use the bundled official CLI skills for WeCom office operations. The modular
+CLI skill is authoritative for commands, parameters, safety checks, and output
+rules. The Unified skill is an intent router and orchestration reference only.
+When the two overlap, follow the modular CLI skill.
+
+1. Read `references/wecom-cli/wecomcli-shared/SKILL.md` before every CLI use.
+2. Read the matching domain skill under `references/wecom-cli/` in full.
+3. For ambiguous or cross-domain requests, also read
+   `references/wecom-unified/SKILL.md`, then return to the modular CLI skill
+   before constructing commands.
+4. Run CLI arguments as an argv array, never through a shell. Code callers can
+   use `src/lib/wecom-cli-bridge.js`.
+
+Supported domains: contacts, document management, online documents, online
+sheets, smart sheets, smart pages, calendar, meetings, todos, disk, email,
+office messages, and media upload/download.
+
+The communication channel and office messaging are separate paths:
+
+- Replies to incoming Zylos conversations and normal proactive C4 messages
+  continue through `scripts/send.js` and the WebSocket service.
+- An explicit user request to send an office message through the authorized
+  WeCom account uses `wecomcli-message` and its current-session restrictions.
+
+Authorization is separate from the WebSocket channel. If
+`wecom-cli auth show --status` reports `unauthorized`, run
+`wecom-cli auth init` and let the user complete the WeCom scan. Never expose
+or copy encrypted CLI credential files, tokens, Bot secrets, or internal IDs.
+Run scan authorization as a managed process so the C4 input pipeline remains
+responsive while the user scans. The component install/upgrade hook owns CLI
+installation. If the binary is missing or below the required version during a
+normal business request, obtain the required component-change confirmation
+before installing or upgrading it.
 
 ## Sending Messages
 
@@ -235,9 +274,12 @@ pm2 logs zylos-wecom
 pm2 restart zylos-wecom
 ```
 
-## 企业微信文档 MCP
+## 企业微信文档 MCP（兼容回退）
 
-这个 skill 只负责通过 `mcporter` 调用企业微信文档 MCP，不要直接调用 Wedoc API。
+文档操作优先使用上面的官方 `wecom-cli` 文档、表格、智能表格或智能文档
+能力。仅当 CLI 明确不支持所需操作，而现有机器人文档 MCP 支持时，才使用
+本兼容路径；不要用 MCP 覆盖或绕过 CLI 的权限和安全约束，也不要直接调用
+Wedoc API。
 
 ### 使用时机
 
