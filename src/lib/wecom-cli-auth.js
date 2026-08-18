@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 
 import { DATA_DIR } from './config.js';
@@ -7,6 +8,8 @@ import { DATA_DIR } from './config.js';
 const AUTH_PAGE_ORIGIN = 'https://work.weixin.qq.com';
 const AUTH_PAGE_PATH = '/ai/qc/gen';
 const SESSION_TTL_MS = 6 * 60 * 1000;
+const REPLY_ENDPOINT_TTL_MS = 10 * 60 * 1000;
+const ENDPOINT_LOG_PREFIX = '[zylos-wecom]';
 
 export class WecomCliAuthFlowError extends Error {
   constructor(code, message) {
@@ -64,6 +67,101 @@ export function assertOwnerDm(endpoint, config) {
     );
   }
   return parsed;
+}
+
+function endpointRecordPath(endpoint, rootDir) {
+  const digest = crypto.createHash('sha256').update(endpoint).digest('hex');
+  return path.join(rootDir, `${digest}.json`);
+}
+
+export function recordOwnerReplyEndpoint(endpoint, config, options = {}) {
+  const parsed = assertOwnerDm(endpoint, config);
+  const rootDir = options.rootDir || path.join(DATA_DIR, 'reply-endpoints');
+  const now = options.now ?? Date.now();
+  fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(rootDir, 0o700);
+
+  for (const name of fs.readdirSync(rootDir)) {
+    if (!name.endsWith('.json')) continue;
+    const candidatePath = path.join(rootDir, name);
+    try {
+      const record = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
+      if (
+        !Number.isFinite(record.receivedAt) ||
+        now < record.receivedAt ||
+        now - record.receivedAt > REPLY_ENDPOINT_TTL_MS
+      ) {
+        fs.rmSync(candidatePath, { force: true });
+      }
+    } catch {
+      fs.rmSync(candidatePath, { force: true });
+    }
+  }
+
+  const recordPath = endpointRecordPath(endpoint, rootDir);
+  const tempPath = `${recordPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify({ endpoint, receivedAt: now }), {
+      mode: 0o600,
+      flag: 'wx'
+    });
+    fs.renameSync(tempPath, recordPath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+  return parsed;
+}
+
+export function consumeOwnerReplyEndpoint(endpoint, config, options = {}) {
+  const onViolation = options.onViolation || console.warn;
+  const reject = (message) => {
+    const error = new WecomCliAuthFlowError('untrusted_endpoint', message);
+    onViolation(`${ENDPOINT_LOG_PREFIX} WECOM_ENDPOINT_PROVENANCE_VIOLATION: ${error.message}`);
+    throw error;
+  };
+
+  let parsed;
+  try {
+    parsed = assertOwnerDm(endpoint, config);
+  } catch (error) {
+    onViolation(
+      `${ENDPOINT_LOG_PREFIX} WECOM_ENDPOINT_PROVENANCE_VIOLATION: ${error.message}`
+    );
+    throw error;
+  }
+
+  const rootDir = options.rootDir || path.join(DATA_DIR, 'reply-endpoints');
+  const recordPath = endpointRecordPath(endpoint, rootDir);
+  const claimPath = `${recordPath}.claimed-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    fs.renameSync(recordPath, claimPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      reject('Endpoint was not issued by the WeCom server reply path');
+    }
+    throw error;
+  }
+
+  try {
+    let record;
+    try {
+      record = JSON.parse(fs.readFileSync(claimPath, 'utf8'));
+    } catch {
+      reject('Endpoint provenance record is invalid');
+    }
+    const now = options.now ?? Date.now();
+    if (
+      record.endpoint !== endpoint ||
+      !Number.isFinite(record.receivedAt) ||
+      now < record.receivedAt ||
+      now - record.receivedAt > REPLY_ENDPOINT_TTL_MS
+    ) {
+      reject('Endpoint provenance record is invalid or expired');
+    }
+    return parsed;
+  } finally {
+    fs.rmSync(claimPath, { force: true });
+  }
 }
 
 export function extractWecomAuthPageUrl(output) {
@@ -214,7 +312,12 @@ function acquireLock(rootDir, now = Date.now()) {
 
 export async function authorizeWecomCli(options) {
   const endpoint = options.endpoint;
-  assertOwnerDm(endpoint, options.config);
+  const consumeEndpoint = options.consumeEndpoint || consumeOwnerReplyEndpoint;
+  consumeEndpoint(endpoint, options.config, {
+    rootDir: options.provenanceRoot,
+    now: options.now,
+    onViolation: options.onEndpointViolation
+  });
 
   const rootDir = options.tempRoot || path.join(DATA_DIR, 'cli-auth');
   const lockPath = acquireLock(rootDir, options.now);

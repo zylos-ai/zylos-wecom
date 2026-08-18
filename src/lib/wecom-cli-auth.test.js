@@ -8,8 +8,10 @@ import { EventEmitter } from 'events';
 import {
   assertOwnerDm,
   authorizeWecomCli,
+  consumeOwnerReplyEndpoint,
   extractWecomAuthPageUrl,
   parseWecomReplyEndpoint,
+  recordOwnerReplyEndpoint,
   runOfficialWecomCliAuth,
   sendWecomC4,
   WecomCliAuthFlowError
@@ -40,6 +42,55 @@ test('assertOwnerDm rejects a non-owner before authorization starts', () => {
     () => assertOwnerDm('someone-else|type:p2p|msg:m1', CONFIG),
     (error) => error instanceof WecomCliAuthFlowError && error.code === 'owner_dm_required'
   );
+});
+
+test('owner reply endpoints require an exact server-recorded provenance entry', () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-endpoint-test-'));
+  const warnings = [];
+
+  try {
+    recordOwnerReplyEndpoint(ENDPOINT, CONFIG, { rootDir, now: 1000 });
+    assert.deepEqual(
+      consumeOwnerReplyEndpoint(ENDPOINT, CONFIG, {
+        rootDir,
+        now: 1001,
+        onViolation: (message) => warnings.push(message)
+      }),
+      { userId: OWNER, type: 'p2p', msg: 'message-1' }
+    );
+    assert.deepEqual(fs.readdirSync(rootDir), []);
+    assert.deepEqual(warnings, []);
+    assert.throws(
+      () => consumeOwnerReplyEndpoint(ENDPOINT, CONFIG, {
+        rootDir,
+        now: 1002,
+        onViolation: (message) => warnings.push(message)
+      }),
+      (error) => error.code === 'untrusted_endpoint'
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /WECOM_ENDPOINT_PROVENANCE_VIOLATION/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('group and non-owner endpoints cannot receive provenance records', () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-endpoint-test-'));
+
+  try {
+    assert.throws(
+      () => recordOwnerReplyEndpoint('group|type:group|msg:m1', CONFIG, { rootDir }),
+      (error) => error.code === 'owner_dm_required'
+    );
+    assert.throws(
+      () => recordOwnerReplyEndpoint('someone-else|type:p2p|msg:m1', CONFIG, { rootDir }),
+      (error) => error.code === 'owner_dm_required'
+    );
+    assert.deepEqual(fs.readdirSync(rootDir), []);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('extractWecomAuthPageUrl accepts only the official temporary page', () => {
@@ -182,13 +233,16 @@ test('runOfficialWecomCliAuth contains a synchronous delivery failure', async ()
 
 test('authorizeWecomCli returns the link and QR to the same owner DM', async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-cli-auth-test-'));
+  const provenanceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-endpoint-test-'));
   const sent = [];
 
   try {
+    recordOwnerReplyEndpoint(ENDPOINT, CONFIG, { rootDir: provenanceRoot });
     const result = await authorizeWecomCli({
       endpoint: ENDPOINT,
       config: CONFIG,
       tempRoot,
+      provenanceRoot,
       sendMessage: async (endpoint, message) => sent.push({ endpoint, message }),
       runAuth: async ({ qrPath, onReady }) => {
         fs.writeFileSync(qrPath, 'png');
@@ -211,8 +265,102 @@ test('authorizeWecomCli returns the link and QR to the same owner DM', async () 
     assert.match(sent[1].message, /^\[MEDIA:image\]/);
     assert.equal(sent[2].message, '企业微信 CLI 授权成功，正在重试刚才的操作。');
     assert.deepEqual(fs.readdirSync(tempRoot), []);
+    assert.deepEqual(fs.readdirSync(provenanceRoot), []);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(provenanceRoot, { recursive: true, force: true });
+  }
+});
+
+test('authorizeWecomCli rejects group and non-owner endpoints before send or exec', async () => {
+  for (const endpoint of [
+    'group|type:group|msg:m1',
+    'someone-else|type:p2p|msg:m1'
+  ]) {
+    const warnings = [];
+    let sent = false;
+    let executed = false;
+
+    await assert.rejects(
+      authorizeWecomCli({
+        endpoint,
+        config: CONFIG,
+        onEndpointViolation: (message) => warnings.push(message),
+        sendMessage: async () => { sent = true; },
+        runAuth: async () => { executed = true; }
+      }),
+      (error) => error.code === 'owner_dm_required'
+    );
+    assert.equal(sent, false);
+    assert.equal(executed, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /WECOM_ENDPOINT_PROVENANCE_VIOLATION/);
+  }
+});
+
+test('authorizeWecomCli rejects fabricated endpoints before send or exec', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-cli-auth-test-'));
+  const provenanceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-endpoint-test-'));
+  const warnings = [];
+  let sent = false;
+  let executed = false;
+
+  try {
+    await assert.rejects(
+      authorizeWecomCli({
+        endpoint: `${OWNER}|type:p2p|msg:hand-built`,
+        config: CONFIG,
+        tempRoot,
+        provenanceRoot,
+        onEndpointViolation: (message) => warnings.push(message),
+        sendMessage: async () => { sent = true; },
+        runAuth: async () => { executed = true; }
+      }),
+      (error) => error.code === 'untrusted_endpoint'
+    );
+    assert.equal(sent, false);
+    assert.equal(executed, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /WECOM_ENDPOINT_PROVENANCE_VIOLATION/);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(provenanceRoot, { recursive: true, force: true });
+  }
+});
+
+test('authorizeWecomCli rejects a tampered server endpoint before send or exec', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-cli-auth-test-'));
+  const provenanceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-endpoint-test-'));
+  let sent = false;
+  let executed = false;
+
+  try {
+    recordOwnerReplyEndpoint(ENDPOINT, CONFIG, { rootDir: provenanceRoot });
+    await assert.rejects(
+      authorizeWecomCli({
+        endpoint: `${OWNER}|type:p2p|msg:tampered`,
+        config: CONFIG,
+        tempRoot,
+        provenanceRoot,
+        onEndpointViolation: () => {},
+        sendMessage: async () => { sent = true; },
+        runAuth: async () => { executed = true; }
+      }),
+      (error) => error.code === 'untrusted_endpoint'
+    );
+    assert.equal(sent, false);
+    assert.equal(executed, false);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+    assert.equal(fs.readdirSync(provenanceRoot).length, 1);
+    assert.deepEqual(
+      consumeOwnerReplyEndpoint(ENDPOINT, CONFIG, { rootDir: provenanceRoot }),
+      { userId: OWNER, type: 'p2p', msg: 'message-1' }
+    );
+    assert.deepEqual(fs.readdirSync(provenanceRoot), []);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(provenanceRoot, { recursive: true, force: true });
   }
 });
 
@@ -226,6 +374,7 @@ test('authorizeWecomCli reports an expired session without leaking its error', a
         endpoint: ENDPOINT,
         config: CONFIG,
         tempRoot,
+        consumeEndpoint: () => {},
         sendMessage: async (_endpoint, message) => sent.push(message),
         runAuth: async () => {
           throw new WecomCliAuthFlowError('auth_failed_or_expired', 'contains-sensitive-detail');
@@ -254,6 +403,7 @@ test('authorizeWecomCli rejects overlapping sessions before starting the CLI', a
         endpoint: ENDPOINT,
         config: CONFIG,
         tempRoot,
+        consumeEndpoint: () => {},
         runAuth: async () => { started = true; },
         sendMessage: async () => {}
       }),

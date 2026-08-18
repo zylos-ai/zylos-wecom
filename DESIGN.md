@@ -60,11 +60,15 @@ helper owns authorization.
 
 CLI authorization is a WeCom-native owner-DM flow. The Agent starts the
 `scripts/wecom-cli-auth.js` helper as a managed process. The helper validates
-the structured endpoint against the bound owner before it starts the official
-QR command, then sends the temporary official link and PNG back through the
-exact C4 reply path of the originating WeCom DM. A process lock prevents
-overlapping authorization sessions and private temporary files are removed
-when the helper finishes.
+the structured endpoint against the bound owner and atomically consumes a
+short-lived, one-time provenance record created when the WebSocket server
+forwarded that exact owner-DM reply endpoint to C4. Group, non-owner,
+reconstructed, changed, expired, and replayed endpoints fail closed with an
+observable `WECOM_ENDPOINT_PROVENANCE_VIOLATION` before any send or CLI exec.
+The helper then starts the official QR command and sends the temporary official
+link and PNG back through the exact originating reply path. A process lock
+prevents overlapping authorization sessions and private temporary files are
+removed when the helper finishes.
 Authorization material must never be sent to a group or another channel. A
 successful scan is followed by an explicit `auth show --status` check before
 the original operation is retried. Because the resulting CLI token is shared

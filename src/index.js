@@ -22,6 +22,7 @@ import WebSocket from 'ws';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
+import { recordOwnerReplyEndpoint } from './lib/wecom-cli-auth.js';
 import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
 import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
@@ -1286,6 +1287,13 @@ async function processCallback(frame) {
       const context = getContextMessages(fromUser, msgId);
       const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath, null, quotedContent);
       const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
+      if (isOwner(fromUser)) {
+        try {
+          recordOwnerReplyEndpoint(endpoint, config);
+        } catch (error) {
+          console.error(`[wecom] Failed to record owner reply endpoint: ${error.message}`);
+        }
+      }
       forwardToC4(formattedMessage, endpoint);
     }
 

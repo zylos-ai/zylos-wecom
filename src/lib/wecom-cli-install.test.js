@@ -36,10 +36,11 @@ test('root skill keeps CLI authorization in the originating WeCom owner DM', () 
 
   assert.match(skill, /private WeCom DM sent by the\s+configured owner/);
   assert.match(skill, /scripts\/wecom-cli-auth\.js --endpoint/);
-  assert.match(skill, /returns the temporary official link and\s+PNG through that exact WeCom endpoint/);
+  assert.match(skill, /returns the temporary\s+official link and PNG through that exact endpoint/);
   assert.match(skill, /do not loop or route authorization through another channel/);
   assert.match(skill, /execute token-backed CLI office operations only for the configured owner/);
   assert.match(skill, /WECOM_CLI_ROUTE_VIOLATION/);
+  assert.match(skill, /WECOM_ENDPOINT_PROVENANCE_VIOLATION/);
   assert.match(skill, /Do not run their generic\s+`npm install -g @wecom\/cli`/);
   assert.match(skill, /install\/upgrade hook exclusively owns the pinned CLI binary/);
 });
@@ -49,6 +50,15 @@ test('channel sender stays on the internal WebSocket path, not the office CLI', 
 
   assert.match(sender, /\/internal\/send/);
   assert.doesNotMatch(sender, /runWecomCli|wecom-cli/);
+});
+
+test('server records the exact owner DM reply endpoint before forwarding to C4', () => {
+  const server = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
+
+  assert.match(
+    server,
+    /const endpoint = `\$\{fromUser\}\|type:p2p\|msg:\$\{msgId\}`;[\s\S]*?recordOwnerReplyEndpoint\(endpoint, config\);[\s\S]*?forwardToC4\(formattedMessage, endpoint\);/
+  );
 });
 
 test('upstream snapshots document the component lifecycle override', () => {

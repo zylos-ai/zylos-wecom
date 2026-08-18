@@ -103,9 +103,14 @@ authorization flow:
    configured owner. Never authorize from a group or for a non-owner. Ask the
    owner to DM the bot when an unauthorized request originates in a group.
 2. Run `node scripts/wecom-cli-auth.js --endpoint <exact-wecom-reply-endpoint>`
-   as a managed process. The helper validates the owner DM before starting the
-   official CLI, keeps C4 responsive, returns the temporary official link and
-   PNG through that exact WeCom endpoint, and polls for up to five minutes.
+   as a managed process. The WebSocket server records that exact owner-DM
+   reply endpoint before forwarding the message to C4. The helper atomically
+   consumes the short-lived, one-time provenance record; a reconstructed,
+   changed, group, non-owner, expired, or replayed endpoint is rejected with
+   `WECOM_ENDPOINT_PROVENANCE_VIOLATION` before any send or CLI execution. It
+   then starts the official CLI, keeps C4 responsive, returns the temporary
+   official link and PNG through that exact endpoint, and polls for up to five
+   minutes.
 3. A successful helper result is JSON with `status: "authorized"` and
    `retryOriginalOperation: true`. Retry the original office operation once.
    On expiry or failure, report the helper's safe error and wait for the owner

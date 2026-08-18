@@ -24,6 +24,11 @@
 - Clarified that component hooks and the owner-DM helper override vendored
   generic CLI install/authorization bootstrap instructions while preserving
   the upstream snapshots unchanged
+- Added one-time owner-DM reply-endpoint provenance: WebSocket ingress records
+  the exact endpoint forwarded to C4, and CLI authorization must consume that
+  short-lived record before any delivery or CLI execution; group, non-owner,
+  fabricated, changed, expired, and replayed endpoints fail closed with
+  `WECOM_ENDPOINT_PROVENANCE_VIOLATION`
 
 ## [0.1.5] - 2026-07-19
 
