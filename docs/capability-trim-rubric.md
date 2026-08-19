@@ -144,10 +144,10 @@ The following matrix applies the rubric to the current source.
 | Local channel context, user-name cache, and idle-gated history replay | CLI can query some office/chat data | `KEEP (must-keep)` | Local context records what C4 saw and sent; it is part of agent continuity and delivery audit. It is not an office history mirror. |
 | P1-1 stable-msgid outbox and restart recovery | No downstream exactly-once or CLI substitute | `KEEP (must-keep)` | It prevents silent loss across the WebSocket-to-C4 boundary and documents the acknowledgement gap. |
 | P0-1 office-message intent guard in `wecom-cli-bridge.js` | It restricts the official CLI message domain itself | `KEEP (must-keep)` | Removing it can reroute ordinary channel traffic through the wrong principal and destination contract. |
-| P0-2 one-time owner-DM endpoint provenance | Official `auth init` generates authorization material | `KEEP (must-keep)` | The CLI does not prove that the C4 reply endpoint was issued by the current owner DM or prevent group/cross-channel QR delivery. |
-| Managed owner-DM CLI authorization helper | Generic upstream `wecom-cli auth init` guidance | `KEEP (must-keep)` | The helper supplies component-specific origin, owner, concurrency, cleanup, and safe-error controls while leaving encrypted CLI credentials under official ownership. |
+| P0-2 one-time owner-DM endpoint provenance | Official `auth init` generates authorization material | `KEEP (must-keep)` | The CLI does not prove that the request came from the current owner DM or prevent replay/cross-channel authorization. |
+| Managed same-Bot owner-DM CLI authorization helper | Generic upstream `wecom-cli auth init` guidance | `KEEP (must-keep)` | The helper supplies component-specific origin, owner, exact-Principal, concurrency, cleanup, and safe-error controls while leaving encrypted CLI credentials under official ownership. |
 | Pinned CLI install/upgrade lifecycle and P1-2 vendor integrity check | Vendored shared guidance contains generic install/auth steps | `KEEP (must-keep)` | Hooks and the manifest bind the supported binary and snapshots to component lifecycle. Generic blocking instructions are intentionally not authoritative here. |
-| Bot credential scan onboarding | CLI account authorization also uses a QR | `KEEP (must-keep)` | Bot onboarding obtains `WECOM_BOT_ID` and `WECOM_BOT_SECRET` for WebSocket transport. CLI authorization obtains a separate account token. Removing it breaks the channel authentication lifecycle. |
+| Bot credential scan onboarding | Raw CLI authorization can also use a QR | `KEEP (must-keep)` | Bot onboarding obtains `WECOM_BOT_ID` and `WECOM_BOT_SECRET` for WebSocket transport. Supported CLI authorization instead reuses that exact Bot through the managed same-Bot path. |
 | Admin CLI, config hot reload, and service policy management | None | `KEEP` | They configure the communication component, not office resources. |
 | Official office domains | Some legacy MCP document operations overlap | `TRIM` | For an operation explicitly supported by the pinned CLI, the root Skill already makes the modular CLI authoritative and removes legacy MCP from the active route. Keep this policy trim. |
 | Generic vendored install and blocking authorization instructions | Component hooks and managed owner-DM auth provide the supported lifecycle | `TRIM` | These instructions are already trimmed from active authority by the root Skill. Do not delete them from pinned snapshots; the override is explicit and P1-2 verifies snapshot purity. |
@@ -166,11 +166,12 @@ falls back to proactive Bot delivery. The CLI message domain uses an authorized
 account and only destinations allowed by its current session. P0-1 exists
 specifically to prevent this substitution.
 
-### "Both use a QR, so keep only CLI authorization"
+### "The CLI supports QR, so use raw CLI authorization"
 
-Rejected by Gate 1. Bot scan onboarding produces WebSocket Bot credentials;
-CLI authorization produces account credentials in the official encrypted
-store. Combining them changes both principal and transport.
+Rejected by Gate 1. Raw CLI QR authorization can create an independent Bot,
+while every supported business command requires the exact channel Bot
+Principal. The managed owner-DM flow reuses the existing Bot and verifies exact
+identity before retrying the operation.
 
 ### "Both handle files, so remove channel media"
 

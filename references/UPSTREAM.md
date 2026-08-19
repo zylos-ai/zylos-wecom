@@ -18,10 +18,10 @@ The snapshots are preserved for provenance and are not the component lifecycle
 authority. Generic upstream instructions to run
 `npm install -g @wecom/cli` or blocking `wecom-cli auth init` must not be
 executed by this component. The root `SKILL.md` overrides those two steps: the
-component install/upgrade hook owns the pinned binary, and the managed owner-DM
-authorization helper owns QR authorization. Domain commands, parameters,
-safety checks, and output rules continue to come from the vendored modular
-Skills.
+component install/upgrade hook owns the pinned binary, and the managed same-Bot
+owner-DM helper owns authorization without QR or an additional Bot. Domain
+commands, parameters, safety checks, and output rules continue to come from the
+vendored modular Skills.
 
 The component-specific policy is declared as a known override in
 `wecom-vendor-manifest.json`. Override paths must remain outside both vendored

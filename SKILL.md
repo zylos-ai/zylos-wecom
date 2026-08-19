@@ -105,7 +105,7 @@ use this WeCom-only authorization flow:
 1. Authorization may be started only from a private WeCom DM sent by the
    configured owner. Never authorize from a group or for a non-owner. Ask the
    owner to DM the bot when an unauthorized request originates in a group.
-2. Prefer the same-Bot path by running
+2. Run the same-Bot path:
    `node scripts/wecom-cli-auth.js --reuse-channel-bot --endpoint <exact-wecom-reply-endpoint>`.
    It feeds the configured `WECOM_BOT_ID` / `WECOM_BOT_SECRET` to the official
    CLI's manual authorization through a PTY. The Secret never appears in argv,
@@ -114,19 +114,12 @@ use this WeCom-only authorization flow:
    configured WebSocket Bot before it reports success.
 3. The helper atomically consumes the short-lived, one-time provenance record;
    a reconstructed, changed, group, non-owner, expired, or replayed endpoint is
-   rejected before any send or CLI execution. No QR is generated and no new Bot
-   is created by this same-Bot path.
-4. Use the QR command below only as an explicit fallback when the owner chooses
-   an independent office Bot instead of the same WebSocket Bot:
-   `node scripts/wecom-cli-auth.js --endpoint <exact-wecom-reply-endpoint>`
-   as a managed process. The WebSocket server records that exact owner-DM
-   reply endpoint before forwarding the message to C4. The helper atomically
-   consumes the short-lived, one-time provenance record; a reconstructed,
-   changed, group, non-owner, expired, or replayed endpoint is rejected with
-   `WECOM_ENDPOINT_PROVENANCE_VIOLATION` before any send or CLI execution. It
-   then starts the official CLI, keeps C4 responsive, returns the temporary
-   official link and PNG through that exact endpoint, and polls for up to five
-   minutes.
+   rejected with `WECOM_ENDPOINT_PROVENANCE_VIOLATION` before any send or CLI
+   execution. No QR is generated and no new Bot is created by this same-Bot
+   path.
+4. Do not run the raw QR authorization command or use an independent office
+   Bot. Every business command enforces exact equality with the channel Bot,
+   so a different Principal is unsupported and will be rejected.
 5. A successful helper result is JSON with `status: "authorized"` and
    `retryOriginalOperation: true`. Retry the original office operation once.
    On expiry or failure, report the helper's safe error and wait for the owner

@@ -82,25 +82,23 @@ pm2 logs zylos-wecom
 
 ### 6. 授权办公能力
 
-通信长连接与办公 CLI 使用独立授权。首次执行办公操作前完成一次扫码授权：
+通信长连接与办公 CLI 使用独立授权存储，但两者必须代表同一个已配置 Bot。
+首次办公请求必须从已绑定 owner 的企业微信私聊发起。Agent 会检查当前 CLI
+Principal；需要授权时，执行托管的同 Bot 授权：
 
 ```bash
-wecom-cli auth show --status
-wecom-cli auth init
+node scripts/wecom-cli-auth.js --check-channel-bot
+node scripts/wecom-cli-auth.js --reuse-channel-bot \
+  --endpoint '<原企业微信回复 endpoint>'
 ```
 
-凭证由官方 CLI 加密保存，不会复制到组件配置中。
+helper 只通过 stdin/PTY 把现有消息 Bot 凭证交给官方 CLI，不进入 argv、子进程
+环境变量或日志。它会原子消费该 owner 私聊的一次性来源记录，校验 CLI Bot ID
+与消息 Bot ID 完全一致，然后自动重试原办公请求一次。整个过程不扫码、不创建
+额外 Bot；群聊或非 owner 请求必须转到 owner 私聊。
 
-从企业微信会话发起授权时，只允许已绑定 owner 的企业微信私聊。Agent 在后台
-保持 CLI 授权进程运行，并把官方临时链接和二维码图片回复到同一个企业微信
-私聊；不得发送到群聊或其他通信渠道。扫码后必须验证状态为 `authorized`，
-再自动重试原办公请求。
-
-Agent 使用以下 helper 完成整个授权会话：
-
-```bash
-node scripts/wecom-cli-auth.js --endpoint '<原企业微信回复 endpoint>'
-```
+组件不支持直接运行 `wecom-cli auth init`：它可能创建独立 Bot，而强制的同 Bot
+业务门禁会拒绝该 Principal。
 
 ## 配置
 

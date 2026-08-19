@@ -12,11 +12,11 @@
   compatibility path when both can serve the same operation
 - Updated `ws` to 8.21.3 to address the memory exhaustion and uninitialized
   memory disclosure advisories affecting earlier 8.x releases
-- Defined CLI authorization as an owner-only WeCom DM flow that returns the
-  temporary link and QR image through the originating C4 reply path
+- Defined CLI authorization as an owner-only same-Bot WeCom DM flow that
+  securely reuses the channel Bot without QR or creating another Bot
 - Added a managed CLI authorization helper with endpoint/owner validation,
-  single-session locking, C4 link/image delivery, status verification, safe
-  failure messages, and private temporary-file cleanup
+  single-session locking, exact Principal verification, safe failure messages,
+  and private temporary-file cleanup
 - Added a fail-closed office-message route guard: code callers must declare an
   explicit office-message intent before entering the CLI `message` domain;
   channel replies/proactive C4 sends remain on `scripts/send.js`, and mixed

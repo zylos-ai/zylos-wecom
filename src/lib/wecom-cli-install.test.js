@@ -35,14 +35,52 @@ test('root skill keeps CLI authorization in the originating WeCom owner DM', () 
   const skill = fs.readFileSync(path.join(root, 'SKILL.md'), 'utf8');
 
   assert.match(skill, /private WeCom DM sent by the\s+configured owner/);
-  assert.match(skill, /scripts\/wecom-cli-auth\.js --endpoint/);
-  assert.match(skill, /returns the temporary\s+official link and PNG through that exact endpoint/);
+  assert.match(skill, /scripts\/wecom-cli-auth\.js --check-channel-bot/);
+  assert.match(skill, /--reuse-channel-bot --endpoint/);
+  assert.match(skill, /No QR is generated and no new Bot/);
+  assert.match(skill, /different Principal is unsupported and will be rejected/);
   assert.match(skill, /do not loop or route authorization through another channel/);
   assert.match(skill, /execute token-backed CLI office operations only for the configured owner/);
   assert.match(skill, /WECOM_CLI_ROUTE_VIOLATION/);
   assert.match(skill, /WECOM_ENDPOINT_PROVENANCE_VIOLATION/);
   assert.match(skill, /Do not run their generic\s+`npm install -g @wecom\/cli`/);
   assert.match(skill, /install\/upgrade hook exclusively owns the pinned CLI binary/);
+});
+
+test('root documentation exposes only the managed same-Bot office auth flow', () => {
+  const documents = [
+    'README.md',
+    'README.zh-CN.md',
+    'DESIGN.md',
+    'CHANGELOG.md',
+    'SKILL.md',
+    path.join('references', 'UPSTREAM.md'),
+    path.join('docs', 'capability-trim-rubric.md')
+  ].map((relativePath) => [
+    relativePath,
+    fs.readFileSync(path.join(root, relativePath), 'utf8')
+  ]);
+
+  for (const [relativePath, content] of documents) {
+    assert.match(content, /same-Bot|同 Bot|exact channel Bot|exact channel-Bot/,
+      `${relativePath} must describe the same-Bot boundary`);
+  }
+
+  const readme = documents.find(([name]) => name === 'README.md')[1];
+  const readmeZh = documents.find(([name]) => name === 'README.zh-CN.md')[1];
+  assert.match(readme, /--check-channel-bot/);
+  assert.match(readme, /--reuse-channel-bot/);
+  assert.match(readme, /No QR is generated and no additional Bot is\s+created/);
+  assert.match(readmeZh, /--check-channel-bot/);
+  assert.match(readmeZh, /--reuse-channel-bot/);
+  assert.match(readmeZh, /不扫码、不创建/);
+
+  for (const [relativePath, content] of documents) {
+    assert.doesNotMatch(content, /wecom-cli auth init\s*\n```/,
+      `${relativePath} must not present raw auth init as an executable workflow`);
+    assert.doesNotMatch(content, /QR (?:command|image).*fallback|二维码.*(?:正常入口|回退)/i,
+      `${relativePath} must not claim independent-Bot QR fallback is supported`);
+  }
 });
 
 test('channel sender stays on the internal WebSocket path, not the office CLI', () => {
@@ -66,7 +104,7 @@ test('upstream snapshots document the component lifecycle override', () => {
   const upstream = fs.readFileSync(path.join(root, 'references', 'UPSTREAM.md'), 'utf8');
 
   assert.match(upstream, /Generic upstream instructions to run\s+`npm install -g @wecom\/cli`/);
-  assert.match(upstream, /managed owner-DM\s+authorization helper owns QR authorization/);
+  assert.match(upstream, /managed same-Bot\s+owner-DM helper owns authorization without QR/);
 });
 
 test('semverCompare handles older, equal, and newer versions', () => {
