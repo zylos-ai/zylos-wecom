@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { execFileSync, spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 
 import { DATA_DIR } from './config.js';
 
@@ -10,6 +11,8 @@ const AUTH_PAGE_PATH = '/ai/qc/gen';
 const SESSION_TTL_MS = 6 * 60 * 1000;
 const REPLY_ENDPOINT_TTL_MS = 10 * 60 * 1000;
 const ENDPOINT_LOG_PREFIX = '[zylos-wecom]';
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const MANUAL_AUTH_HELPER = path.resolve(MODULE_DIR, '../../scripts/wecom-cli-manual-auth-pty.py');
 
 export class WecomCliAuthFlowError extends Error {
   constructor(code, message) {
@@ -276,12 +279,80 @@ export function runOfficialWecomCliAuth(options) {
   });
 }
 
-export function checkWecomCliAuthStatus(exec = execFileSync) {
+/**
+ * Authorize the official CLI with the already-configured WebSocket Bot.
+ * Credentials travel only over the helper's stdin and PTY; they are never
+ * placed in argv, environment variables, output, or logs.
+ */
+export function runOfficialWecomCliManualAuth(options) {
+  const spawnImpl = options.spawnImpl || spawn;
+  const botId = String(options.botId || '');
+  const secret = String(options.secret || '');
+  if (!botId || !secret || /[\r\n]/.test(botId) || /[\r\n]/.test(secret)) {
+    return Promise.reject(new WecomCliAuthFlowError(
+      'bot_credentials_missing',
+      'Existing WeCom Bot credentials are required'
+    ));
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl(options.pythonPath || 'python3', [
+      options.helperPath || MANUAL_AUTH_HELPER
+    ], {
+      env: options.env || process.env,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    child.stdout?.on('data', (chunk) => {
+      stdout = `${stdout}${chunk}`.slice(-4096);
+    });
+    child.stderr?.resume?.();
+    child.on('error', () => reject(new WecomCliAuthFlowError(
+      'cli_start_failed',
+      'Unable to start the secure WeCom CLI manual auth helper'
+    )));
+    child.on('close', (code) => {
+      let result = null;
+      try {
+        result = JSON.parse(stdout.trim());
+      } catch {}
+      if (code === 0 && result?.ok === true && result.status === 'authorized') {
+        resolve();
+        return;
+      }
+      reject(new WecomCliAuthFlowError(
+        result?.error || 'auth_failed_or_expired',
+        'WeCom CLI manual authorization did not complete'
+      ));
+    });
+    child.stdin.end(`${JSON.stringify({
+      bot_id: botId,
+      secret,
+      cli_path: options.cliPath || 'wecom-cli',
+      timeout_seconds: options.timeoutSeconds || 30
+    })}\n`);
+  });
+}
+
+export function checkWecomCliAuthStatus(exec = execFileSync, options = {}) {
   const output = exec('wecom-cli', ['auth', 'show', '--status'], {
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: options.env || process.env
   }).trim();
   return output === 'authorized';
+}
+
+export function checkWecomCliAuthMatchesBot(expectedBotId, exec = execFileSync, options = {}) {
+  if (!expectedBotId) return false;
+  const output = exec('wecom-cli', ['auth', 'show'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: options.env || process.env
+  });
+  const status = String(output).match(/^Status:\s*(\S+)\s*$/m)?.[1];
+  const botId = String(output).match(/^Bot ID:\s*(\S+)\s*$/m)?.[1];
+  return status === 'authorized' && botId === expectedBotId;
 }
 
 function acquireLock(rootDir, now = Date.now()) {

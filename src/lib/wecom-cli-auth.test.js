@@ -8,11 +8,13 @@ import { EventEmitter } from 'events';
 import {
   assertOwnerDm,
   authorizeWecomCli,
+  checkWecomCliAuthMatchesBot,
   consumeOwnerReplyEndpoint,
   extractWecomAuthPageUrl,
   parseWecomReplyEndpoint,
   recordOwnerReplyEndpoint,
   runOfficialWecomCliAuth,
+  runOfficialWecomCliManualAuth,
   sendWecomC4,
   WecomCliAuthFlowError
 } from './wecom-cli-auth.js';
@@ -229,6 +231,99 @@ test('runOfficialWecomCliAuth contains a synchronous delivery failure', async ()
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test('manual auth keeps Bot credentials out of argv, env, and output', async () => {
+  let invocation;
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = {
+    end(content) {
+      invocation.stdin = content;
+      queueMicrotask(() => {
+        child.stdout.emit('data', '{"ok":true,"status":"authorized"}\n');
+        child.emit('close', 0);
+      });
+    }
+  };
+
+  await runOfficialWecomCliManualAuth({
+    botId: 'bot-sensitive',
+    secret: 'secret-sensitive',
+    helperPath: '/secure/manual-auth.py',
+    env: { PATH: '/usr/bin' },
+    spawnImpl(command, args, options) {
+      invocation = { command, args, options };
+      return child;
+    }
+  });
+
+  assert.equal(invocation.command, 'python3');
+  assert.deepEqual(invocation.args, ['/secure/manual-auth.py']);
+  assert.equal(invocation.options.shell, undefined);
+  assert.equal(JSON.stringify(invocation.args).includes('secret-sensitive'), false);
+  assert.equal(JSON.stringify(invocation.options.env).includes('secret-sensitive'), false);
+  const payload = JSON.parse(invocation.stdin);
+  assert.equal(payload.bot_id, 'bot-sensitive');
+  assert.equal(payload.secret, 'secret-sensitive');
+});
+
+test('manual auth fails before spawning when Bot credentials are missing', async () => {
+  let spawned = false;
+  await assert.rejects(
+    runOfficialWecomCliManualAuth({
+      botId: '',
+      secret: '',
+      spawnImpl() {
+        spawned = true;
+      }
+    }),
+    (error) => error.code === 'bot_credentials_missing'
+  );
+  assert.equal(spawned, false);
+});
+
+test('manual auth PTY helper completes an interactive CLI without exposing input', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-manual-auth-test-'));
+  const fakeCli = path.join(root, 'fake-wecom-cli.py');
+  try {
+    fs.writeFileSync(fakeCli, `#!/usr/bin/env python3
+import sys
+sys.stdout.write("Bot ID: ")
+sys.stdout.flush()
+bot_id = sys.stdin.readline().strip()
+sys.stdout.write("Secret: ")
+sys.stdout.flush()
+secret = sys.stdin.readline().strip()
+raise SystemExit(0 if bot_id == "bot-test" and secret == "secret-test" else 2)
+`, { mode: 0o700 });
+
+    await runOfficialWecomCliManualAuth({
+      botId: 'bot-test',
+      secret: 'secret-test',
+      cliPath: fakeCli,
+      timeoutSeconds: 5
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('single-Bot gate accepts only an authorized exact Bot ID match', () => {
+  const exec = (_command, _args, options) => {
+    assert.equal(options.env.TEST_SCOPE, 'isolated');
+    return 'Status: authorized\nBot ID: bot-current\n';
+  };
+  assert.equal(
+    checkWecomCliAuthMatchesBot('bot-current', exec, { env: { TEST_SCOPE: 'isolated' } }),
+    true
+  );
+  assert.equal(
+    checkWecomCliAuthMatchesBot('bot-other', exec, { env: { TEST_SCOPE: 'isolated' } }),
+    false
+  );
+  assert.equal(checkWecomCliAuthMatchesBot('', exec), false);
 });
 
 test('authorizeWecomCli returns the link and QR to the same owner DM', async () => {
