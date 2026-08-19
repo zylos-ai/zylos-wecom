@@ -28,6 +28,9 @@
 - **Admin CLI** -- Configuration management without manual JSON editing
 - **Hot Reload** -- Config changes take effect without restart (most settings)
 - **Doc MCP Bootstrap** -- Best-effort fetch and persistence of WeCom doc MCP config after WS auth
+- **Official Office CLI** -- Installs the pinned official `wecom-cli` and bundles
+  its 14 modular skills plus the WeCom Unified router for contacts, documents,
+  sheets, calendar, meetings, todos, disk, email, messages, and media
 
 ## Prerequisites
 
@@ -77,6 +80,29 @@ pm2 logs zylos-wecom
 ### 5. Test
 
 Send a message to your WeCom bot. The first private message sender becomes the owner.
+
+### 6. Authorize Office Capabilities
+
+The communication channel and office CLI use separate authorization stores,
+but both must represent the same configured Bot. Start the first office request
+from the configured owner's private WeCom DM. The Agent checks the current CLI
+Principal and, when authorization is required, runs the managed same-Bot flow:
+
+```bash
+node scripts/wecom-cli-auth.js --check-channel-bot
+node scripts/wecom-cli-auth.js --reuse-channel-bot \
+  --endpoint '<original-wecom-reply-endpoint>'
+```
+
+The helper securely supplies the existing channel Bot credentials to the
+official CLI through stdin/PTY, never argv, child environment variables, or
+logs. It consumes the exact one-time owner-DM reply provenance, verifies that
+the authorized CLI Bot ID exactly matches the channel Bot ID, and then retries
+the original office request once. No QR is generated and no additional Bot is
+created. Group or non-owner requests must move to the owner's private DM.
+
+Raw `wecom-cli auth init` is not a supported component workflow: it can create
+an independent Bot that the mandatory same-Bot business gate will reject.
 
 ## Configuration
 

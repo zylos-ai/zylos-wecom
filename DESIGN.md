@@ -34,6 +34,56 @@ WeCom Servers --> User
 
 ## Key Design Decisions
 
+### Communication Channel vs Office CLI
+
+The component has two independent WeCom data planes:
+
+- The long-running WebSocket service handles incoming conversations, C4
+  routing, replies, and normal proactive channel messages.
+- The official `wecom-cli` handles account-authorized office operations such
+  as contacts, documents, sheets, calendars, meetings, todos, disk, email,
+  office messages, and media.
+
+The office-message overlap is fail-closed. Code callers using
+`src/lib/wecom-cli-bridge.js` may enter the CLI `message` domain only with the
+`explicit-office-message` intent. Missing or different intent throws and logs
+`WECOM_CLI_ROUTE_VIOLATION`; channel replies and normal proactive C4 messages
+remain on `scripts/send.js` and never receive that intent.
+
+The component lifecycle hooks install a pinned minimum CLI version. The CLI's
+own encrypted authorization store remains separate from the channel's Bot ID
+and Secret; the component never copies or reimplements CLI credentials.
+Vendored upstream Skills remain unmodified snapshots. Their generic direct
+install and blocking authorization bootstrap text is superseded by the root
+component Skill: lifecycle hooks own installation and the managed owner-DM
+helper owns authorization.
+
+CLI authorization is a WeCom-native same-Bot owner-DM flow. The Agent first
+runs `scripts/wecom-cli-auth.js --check-channel-bot`. When reauthorization is
+required it starts the helper with `--reuse-channel-bot` as a managed process.
+The helper validates
+the structured endpoint against the bound owner and atomically consumes a
+short-lived, one-time provenance record created when the WebSocket server
+forwarded that exact owner-DM reply endpoint to C4. Group, non-owner,
+reconstructed, changed, expired, and replayed endpoints fail closed with an
+observable `WECOM_ENDPOINT_PROVENANCE_VIOLATION` before any send or CLI exec.
+The helper supplies the configured channel Bot credentials to the official CLI
+only through stdin/PTY, strips both credential variables from child
+environments, and requires the resulting CLI Principal to exactly match the
+channel Bot. No QR is generated and no additional Bot is created. A process
+lock prevents overlapping authorization sessions and private temporary files
+are removed when the helper finishes. The original operation is retried once
+only after the exact-Bot check passes. Raw `wecom-cli auth init` and an
+independent office Bot are not supported by this architecture because the
+mandatory business-command gate rejects any non-channel Principal. Office
+operations default to the configured owner only; broader access requires a
+separately enforced policy.
+
+The source package includes both upstream Skill layouts. The 14 modular CLI
+skills are authoritative for execution details. The Unified snapshot is used
+for aggregate intent routing and cross-domain workflows; overlapping command
+guidance always resolves to the modular CLI skill.
+
 ### WebSocket Long Connection (vs HTTP Callback)
 
 Chose WebSocket mode because:
@@ -99,13 +149,29 @@ First private message sender becomes the owner:
 
 1. WebSocket receives `aibot_msg_callback` JSON frame
 2. Extract: msgId, chatType, from.userid, msgtype, content
-3. Deduplicate by msgId (10-minute TTL)
+3. Suppress delivered msgIds; recover pending msgIds (10-minute delivered TTL)
 4. Track reqId for reply (5-minute TTL)
 5. Check permissions (DM policy / group policy)
 6. Auto-bind owner if first DM
 7. Cache sender name if available
-8. Record to in-memory history
-9. Format as C4 message and forward via c4-receive.js
+8. Replay existing history and format the C4 message
+9. Persist a `pending` delivery record keyed by the stable WeCom `body.msgid`
+10. Forward to C4
+11. Append channel history, then persist `delivered`
+
+### Restart delivery boundary
+
+The delivery journal separates receipt from confirmed C4 acceptance. Pending
+records are retried in receive order at startup; only delivered records are
+suppressed during the 10-minute retry-safe window. Persistence and forwarding
+failures are logged and remain pending rather than being silently discarded.
+
+C4 currently has no inbound idempotency key. If the process exits after C4 has
+accepted a message but before the delivered marker is durably appended, startup
+recovery forwards that stable `msgid` again. This narrow acknowledgement gap is
+an explicit at-least-once boundary until C4 adds consumer-side `msgid`
+idempotency; the component logs the ambiguous state instead of claiming
+end-to-end exactly-once delivery.
 
 ### Outgoing Message
 
@@ -123,8 +189,13 @@ First private message sender becomes the owner:
 | `src/index.js` | WebSocket client, message processing, internal API |
 | `src/admin.js` | Configuration management CLI |
 | `src/lib/config.js` | Config loader with hot-reload |
+| `src/lib/wecom-cli-bridge.js` | Shell-free official CLI invocation and typed auth errors |
+| `src/lib/wecom-cli-auth.js` | Owner-DM CLI authorization orchestration and C4 delivery |
 | `scripts/send.js` | C4 outbound interface |
-| `hooks/` | Install/upgrade lifecycle hooks |
+| `scripts/wecom-cli-auth.js` | Agent-facing managed CLI authorization entry point |
+| `hooks/` | Install/upgrade lifecycle hooks, including pinned CLI setup |
+| `references/wecom-cli/` | Authoritative 14-domain official CLI Skill snapshot |
+| `references/wecom-unified/` | Aggregate official Unified Skill snapshot |
 
 ## Configuration
 

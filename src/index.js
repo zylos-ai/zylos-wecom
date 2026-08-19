@@ -22,7 +22,12 @@ import WebSocket from 'ws';
 dotenv.config({ path: path.join(process.env.HOME, 'zylos/.env') });
 
 import { getConfig, watchConfig, saveConfig, DATA_DIR, getCredentials, stopWatching } from './lib/config.js';
+import { recordOwnerReplyEndpoint } from './lib/wecom-cli-auth.js';
 import { fetchAndSaveWecomDocMcpConfig } from './lib/mcp-config.js';
+import {
+  createMessageDeliveryOutbox,
+  DEFAULT_MESSAGE_DELIVERY_TTL_MS
+} from './lib/message-delivery-outbox.js';
 import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
 
@@ -38,6 +43,7 @@ let internalServer = null;
 let reconnectDelay = 1000;
 let authenticated = false;
 let subscribeReqId = null; // Track subscribe req_id for auth response matching
+let callbackQueue = Promise.resolve();
 
 function runtimeLocale() {
   return resolveRuntimeLocale(config);
@@ -66,6 +72,7 @@ console.log(`[wecom] ${localizedRuntimeMessage('runtime_data_dir', { dir: DATA_D
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const HISTORY_DIR = path.join(DATA_DIR, 'history');
+const DELIVERY_JOURNAL_PATH = path.join(DATA_DIR, 'message-delivery.jsonl');
 fs.mkdirSync(LOGS_DIR, { recursive: true });
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 fs.mkdirSync(HISTORY_DIR, { recursive: true });
@@ -99,29 +106,29 @@ watchConfig((newConfig) => {
 // ============================================================
 // Message deduplication
 // ============================================================
-const DEDUP_TTL = 10 * 60 * 1000; // 10 minutes
-const processedMessages = new Map();
-
-function isDuplicate(msgId) {
-  if (!msgId) return false;
-  if (processedMessages.has(msgId)) {
+const DEDUP_TTL = DEFAULT_MESSAGE_DELIVERY_TTL_MS; // Exceeds the ~6 minute WeCom retry window.
+const messageDeliveryOutbox = createMessageDeliveryOutbox({
+  journalPath: DELIVERY_JOURNAL_PATH,
+  ttlMs: DEDUP_TTL,
+  onDuplicate: (msgId) => {
     console.log(`[wecom] ${localizedRuntimeMessage('runtime_duplicate_msg', { msgId })}`);
-    return true;
+  },
+  onError: (message) => {
+    console.error(`[wecom] Message delivery journal load failed: ${message}`);
+  },
+  onAmbiguousDelivery: (msgId, error) => {
+    console.error(`[wecom] C4 may have accepted ${msgId}, but delivered state was not persisted: ${error.message}. The message remains pending and may be forwarded again after restart.`);
   }
-  processedMessages.set(msgId, Date.now());
-  if (processedMessages.size > 500) {
-    const now = Date.now();
-    for (const [id, ts] of processedMessages) {
-      if (now - ts > DEDUP_TTL) processedMessages.delete(id);
-    }
-  }
-  return false;
-}
+});
+const processingMessages = new Map();
+const forwardingMessages = new Set();
+let deliveryQueue = Promise.resolve();
 
 const dedupCleanupInterval = setInterval(() => {
   const now = Date.now();
-  for (const [id, ts] of processedMessages) {
-    if (now - ts > DEDUP_TTL) processedMessages.delete(id);
+  messageDeliveryOutbox.prune(now);
+  for (const [msgId, startedAt] of processingMessages) {
+    if (now - startedAt > DEDUP_TTL) processingMessages.delete(msgId);
   }
 }, DEDUP_TTL);
 
@@ -531,15 +538,49 @@ function ensureHistoryReplay(chatId) {
   }
 }
 
-function logAndRecordHistory(chatId, entry) {
+function historyLogContainsMsgId(chatId, msgId) {
+  const logFile = historyLogFile(chatId);
+  if (!fs.existsSync(logFile)) return false;
+  try {
+    const lines = fs.readFileSync(logFile, 'utf8').split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        if (String(JSON.parse(line)?.msgId) === String(msgId)) return true;
+      } catch {
+        // Existing replay behavior also skips malformed individual lines.
+      }
+    }
+    return false;
+  } catch (err) {
+    console.error(`[wecom] History duplicate check failed for ${chatId}: ${err.message}`);
+    return null;
+  }
+}
+
+function logAndRecordHistory(chatId, entry, { checkDisk = false } = {}) {
   chatId = String(chatId);
   ensureHistoryReplay(chatId);
+  const existing = chatHistories.get(chatId) || [];
+  if (entry.msgId && existing.some(message => message.msgId === entry.msgId)) {
+    return true;
+  }
+  if (checkDisk && entry.msgId) {
+    const persisted = historyLogContainsMsgId(chatId, entry.msgId);
+    if (persisted === null) return false;
+    if (persisted) {
+      recordHistoryEntry(chatId, entry);
+      return true;
+    }
+  }
   try {
     fs.appendFileSync(historyLogFile(chatId), JSON.stringify(entry) + '\n');
   } catch (err) {
     console.error(`[wecom] History write failed for ${chatId}: ${err.message}`);
+    return false;
   }
   recordHistoryEntry(chatId, entry);
+  return true;
 }
 
 // The bot's display name, used to label its own replies inside
@@ -678,17 +719,62 @@ function forwardToC4(content, replyVia) {
     '--content', content
   ];
 
-  execFile('node', args, {
-    encoding: 'utf8',
-    timeout: 30000
-  }, (error, stdout, stderr) => {
-    if (error) {
-      console.error(`[wecom] C4 forward error: ${error.message}`);
-      if (stderr) console.error(`[wecom] C4 stderr: ${stderr}`);
-    } else {
+  return new Promise((resolve, reject) => {
+    execFile('node', args, {
+      encoding: 'utf8',
+      timeout: 30000
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = stderr?.trim() || error.message;
+        reject(new Error(detail));
+        return;
+      }
       console.log(`[wecom] Sent to C4: ${content.substring(0, 80)}...`);
-    }
+      resolve(stdout);
+    });
   });
+}
+
+async function deliverOutboxRecord(record, { retry = false } = {}) {
+  if (forwardingMessages.has(record.msgId)) return false;
+  forwardingMessages.add(record.msgId);
+  try {
+    await messageDeliveryOutbox.deliver(record, {
+      forward: (entry) => forwardToC4(entry.content, entry.endpoint),
+      recordHistory: (entry) => logAndRecordHistory(
+        entry.historyChatId,
+        entry.historyEntry,
+        { checkDisk: retry }
+      )
+    });
+    processingMessages.delete(record.msgId);
+    return true;
+  } catch (error) {
+    processingMessages.delete(record.msgId);
+    if (error.c4Accepted) {
+      console.error(`[wecom] At-least-once acknowledgement gap for ${record.msgId}: C4 accepted the message but local delivered state is incomplete. A restart will forward this msgid again because C4 has no inbound idempotency key.`);
+    }
+    console.error(`[wecom] Message ${record.msgId} remains pending after delivery failure: ${error.message}`);
+    return false;
+  } finally {
+    forwardingMessages.delete(record.msgId);
+  }
+}
+
+function scheduleOutboxDelivery(record, options) {
+  const scheduled = deliveryQueue.then(() => deliverOutboxRecord(record, options));
+  deliveryQueue = scheduled.catch(() => false);
+  return scheduled;
+}
+
+async function recoverPendingDeliveries() {
+  const pending = messageDeliveryOutbox.pendingRecords();
+  if (pending.length === 0) return;
+  console.warn(`[wecom] Recovering ${pending.length} pending C4 message delivery record(s)`);
+  for (const record of pending) {
+    console.warn(`[wecom] Re-forwarding pending msgid ${record.msgId}; it may duplicate if C4 accepted it before the previous process exited because C4 has no inbound idempotency key.`);
+    await scheduleOutboxDelivery(record, { retry: true });
+  }
 }
 
 // ============================================================
@@ -1100,8 +1186,29 @@ async function processCallback(frame) {
       return;
     }
 
-    // Deduplication
-    if (isDuplicate(msgId)) return;
+    if (!msgId) {
+      console.error('[wecom] Ignoring inbound message without stable body.msgid; restart-safe delivery requires the provider message id');
+      return;
+    }
+
+    // Only delivered messages are restart-safe duplicates. Pending messages
+    // remain eligible for redelivery so a crash before C4 acceptance cannot
+    // silently lose them.
+    const deliveryState = messageDeliveryOutbox.lookup(msgId);
+    if (deliveryState?.state === 'delivered') {
+      messageDeliveryOutbox.enqueue({ msgId });
+      return;
+    }
+    if (deliveryState?.state === 'pending') {
+      console.warn(`[wecom] Re-forwarding pending msgid ${msgId}; it may duplicate if C4 accepted it before local delivered state was persisted.`);
+      await scheduleOutboxDelivery(deliveryState.record, { retry: true });
+      return;
+    }
+    if (processingMessages.has(msgId)) {
+      console.log(`[wecom] ${localizedRuntimeMessage('runtime_duplicate_msg', { msgId })}`);
+      return;
+    }
+    if (msgId) processingMessages.set(msgId, Date.now());
 
     // Track reqId for later reply
     trackRequest(msgId, reqId, chatId, fromUser, chatType);
@@ -1267,27 +1374,52 @@ async function processCallback(frame) {
       learnBotNameFromMention(textContent);
     }
 
-    // Record to history (memory + JSONL)
-    logAndRecordHistory(isGroup ? chatId : fromUser, {
+    const historyChatId = isGroup ? chatId : fromUser;
+    ensureHistoryReplay(historyChatId);
+    const historyEntry = {
       msgId,
       userId: fromUser,
       userName: senderName,
       text: textContent || `[replying to: "${quotedContent}"]`,
       timestamp: new Date().toISOString()
-    });
+    };
 
+    let formattedMessage;
+    let endpoint;
     if (isGroup) {
       const groupName = config.groups?.[chatId]?.name || chatId;
       const context = getContextMessages(chatId, msgId);
-      const formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName, quotedContent);
-      const endpoint = `${chatId}|type:group|msg:${msgId}`;
-      forwardToC4(formattedMessage, endpoint);
+      formattedMessage = formatC4Message('group', senderName, textContent, context, filePath, groupName, quotedContent);
+      endpoint = `${chatId}|type:group|msg:${msgId}`;
     } else {
       const context = getContextMessages(fromUser, msgId);
-      const formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath, null, quotedContent);
-      const endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
-      forwardToC4(formattedMessage, endpoint);
+      formattedMessage = formatC4Message('p2p', senderName, textContent, context, filePath, null, quotedContent);
+      endpoint = `${fromUser}|type:p2p|msg:${msgId}`;
+      if (isOwner(fromUser)) {
+        try {
+          recordOwnerReplyEndpoint(endpoint, config);
+        } catch (error) {
+          console.error(`[wecom] Failed to record owner reply endpoint: ${error.message}`);
+        }
+      }
     }
+
+    let queued;
+    try {
+      queued = messageDeliveryOutbox.enqueue({
+        msgId,
+        receivedAt: historyEntry.timestamp,
+        content: formattedMessage,
+        endpoint,
+        historyChatId,
+        historyEntry
+      });
+    } catch (error) {
+      processingMessages.delete(msgId);
+      console.error(`[wecom] Message ${msgId} was not forwarded because pending state could not be persisted: ${error.message}`);
+      return;
+    }
+    await scheduleOutboxDelivery(queued.record);
 
     console.log(`[wecom] ${localizedRuntimeMessage('runtime_message_summary', {
       kind: localizedRuntimeMessage(isGroup ? 'runtime_kind_group' : 'runtime_kind_dm'),
@@ -1388,7 +1520,7 @@ function connect() {
 
       // Handle message/event callbacks
       if (cmd === 'aibot_msg_callback' || cmd === 'aibot_event_callback') {
-        processCallback(frame).catch(err => {
+        callbackQueue = callbackQueue.then(() => processCallback(frame)).catch(err => {
           console.error(`[wecom] ${localizedRuntimeMessage('runtime_callback_error', { message: err.message })}`);
         });
         return;
@@ -1599,6 +1731,7 @@ async function handleInternalRequest(url, data, res) {
 // Startup
 // ============================================================
 startInternalServer();
+await recoverPendingDeliveries();
 connect();
 
 console.log(`[wecom] ${localizedRuntimeMessage('runtime_bot_id', { botId: `${creds.bot_id.substring(0, 8)}...` })}`);

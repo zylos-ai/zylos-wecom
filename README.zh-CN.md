@@ -27,6 +27,9 @@
 - **C4 桥接** -- 标准 Zylos 通讯桥接集成
 - **管理 CLI** -- 无需手动编辑 JSON 的配置管理
 - **热重载** -- 配置更改无需重启即可生效(大部分设置)
+- **官方办公 CLI** -- 固定安装官方 `wecom-cli`，并内置 14 个模块化 Skill
+  与 Unified 聚合路由，覆盖通讯录、文档、表格、日程、会议、待办、微盘、
+  邮件、消息和媒体能力
 
 ## 环境要求
 
@@ -76,6 +79,26 @@ pm2 logs zylos-wecom
 ### 5. 测试
 
 向企业微信机器人发送一条消息。第一个发送私聊消息的用户将成为主人。
+
+### 6. 授权办公能力
+
+通信长连接与办公 CLI 使用独立授权存储，但两者必须代表同一个已配置 Bot。
+首次办公请求必须从已绑定 owner 的企业微信私聊发起。Agent 会检查当前 CLI
+Principal；需要授权时，执行托管的同 Bot 授权：
+
+```bash
+node scripts/wecom-cli-auth.js --check-channel-bot
+node scripts/wecom-cli-auth.js --reuse-channel-bot \
+  --endpoint '<原企业微信回复 endpoint>'
+```
+
+helper 只通过 stdin/PTY 把现有消息 Bot 凭证交给官方 CLI，不进入 argv、子进程
+环境变量或日志。它会原子消费该 owner 私聊的一次性来源记录，校验 CLI Bot ID
+与消息 Bot ID 完全一致，然后自动重试原办公请求一次。整个过程不扫码、不创建
+额外 Bot；群聊或非 owner 请求必须转到 owner 私聊。
+
+组件不支持直接运行 `wecom-cli auth init`：它可能创建独立 Bot，而强制的同 Bot
+业务门禁会拒绝该 Principal。
 
 ## 配置
 

@@ -8,12 +8,21 @@
  * This hook handles component-specific migrations:
  * - Config schema migrations (including v0.1.x -> v0.2.x WebSocket migration)
  * - Data format updates
+ * - Official wecom-cli version and bundled office-skill verification
  *
  * Note: Service restart is handled by Claude after this hook.
  */
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import {
+  installWecomCliBinary,
+  verifyBundledWecomSkills
+} from './wecom-cli-shared.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SKILL_DIR = path.resolve(__dirname, '..');
 
 function timestampSuffix() {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -192,6 +201,15 @@ if (!envContent.includes('WECOM_BOT_ID') || !envContent.includes('WECOM_BOT_SECR
   console.log('  WARNING: WECOM_BOT_ID and WECOM_BOT_SECRET are required for WebSocket mode.');
   console.log('  Add them to ~/zylos/.env before starting the service.');
   console.log('  (Old WECOM_CORP_* vars are no longer used)');
+}
+
+console.log('\nEnsuring official wecom-cli integration...');
+try {
+  verifyBundledWecomSkills(SKILL_DIR);
+  installWecomCliBinary();
+} catch (err) {
+  console.error('wecom-cli integration migration failed:', err.message);
+  process.exit(1);
 }
 
 console.log('\n[post-upgrade] Complete!');

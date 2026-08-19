@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Pinned official `wecom-cli` install/upgrade integration with version checks
+- Fourteen modular official CLI skills and the WeCom Unified aggregate router
+- Shell-free CLI bridge with typed authorization errors and focused tests
+
+### Changed
+- Official CLI capabilities now take precedence over the legacy document MCP
+  compatibility path when both can serve the same operation
+- Updated `ws` to 8.21.3 to address the memory exhaustion and uninitialized
+  memory disclosure advisories affecting earlier 8.x releases
+- Defined CLI authorization as an owner-only same-Bot WeCom DM flow that
+  securely reuses the channel Bot without QR or creating another Bot
+- Added a managed CLI authorization helper with endpoint/owner validation,
+  single-session locking, exact Principal verification, safe failure messages,
+  and private temporary-file cleanup
+- Added a fail-closed office-message route guard: code callers must declare an
+  explicit office-message intent before entering the CLI `message` domain;
+  channel replies/proactive C4 sends remain on `scripts/send.js`, and mixed
+  routing emits `WECOM_CLI_ROUTE_VIOLATION`
+- Clarified that component hooks and the owner-DM helper override vendored
+  generic CLI install/authorization bootstrap instructions while preserving
+  the upstream snapshots unchanged
+- Added one-time owner-DM reply-endpoint provenance: WebSocket ingress records
+  the exact endpoint forwarded to C4, and CLI authorization must consume that
+  short-lived record before any delivery or CLI execution; group, non-owner,
+  fabricated, changed, expired, and replayed endpoints fail closed with
+  `WECOM_ENDPOINT_PROVENANCE_VIOLATION`
+
 ## [0.1.5] - 2026-07-19
 
 ### Added

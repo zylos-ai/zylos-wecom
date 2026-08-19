@@ -6,6 +6,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "cli-auth": "node scripts/wecom-cli-auth.js",
+    "check:wecom-vendor": "node scripts/check-wecom-vendor.js",
     "test": "node --test \"src/**/*.test.js\""
   },
   "homepage": "https://github.com/zylos-ai/zylos-wecom#readme",
@@ -31,6 +33,12 @@
   "dependencies": {
     "dotenv": "^16.4.5",
     "qrcode": "^1.5.4",
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
+  },
+  "wecomCli": {
+    "package": "@wecom/cli",
+    "version": "1.1.0",
+    "skillsCommit": "1d9e74026455a85d8d10a917b4d453ed4b9a829e",
+    "unifiedCommit": "2620033fdb2721fb192ac06a6a0510987035d203"
   }
 }
