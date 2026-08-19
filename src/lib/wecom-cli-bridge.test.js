@@ -133,10 +133,14 @@ test('runWecomCli rejects a stale or different Bot before a business command', (
   assert.equal(businessExecuted, false);
 });
 
-test('runWecomCli strips the Bot Secret from gate and business child environments', () => {
+test('runWecomCli strips Bot credentials from gate and business child environments', () => {
   const seenEnvironments = [];
   runWecomCli(['contact', 'search'], {
-    env: { PATH: '/usr/bin', WECOM_BOT_SECRET: 'must-not-leak' },
+    env: {
+      PATH: '/usr/bin',
+      WECOM_BOT_ID: 'must-not-leak-id',
+      WECOM_BOT_SECRET: 'must-not-leak-secret'
+    },
     exec(_command, args, options) {
       seenEnvironments.push(options.env);
       if (args[0] === 'auth' && args[1] === 'show') {
@@ -147,6 +151,7 @@ test('runWecomCli strips the Bot Secret from gate and business child environment
   });
   assert.equal(seenEnvironments.length, 2);
   for (const env of seenEnvironments) {
+    assert.equal(env.WECOM_BOT_ID, undefined);
     assert.equal(env.WECOM_BOT_SECRET, undefined);
   }
 });

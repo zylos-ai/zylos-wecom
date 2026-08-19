@@ -63,6 +63,7 @@ def main():
     pid, master_fd = pty.fork()
     if pid == 0:
         child_env = os.environ.copy()
+        child_env.pop("WECOM_BOT_ID", None)
         child_env.pop("WECOM_BOT_SECRET", None)
         os.execvpe(cli_path, [cli_path, "auth", "init", "--manual"], child_env)
 

@@ -252,7 +252,11 @@ test('manual auth keeps Bot credentials out of argv, env, and output', async () 
     botId: 'bot-sensitive',
     secret: 'secret-sensitive',
     helperPath: '/secure/manual-auth.py',
-    env: { PATH: '/usr/bin' },
+    env: {
+      PATH: '/usr/bin',
+      WECOM_BOT_ID: 'parent-bot-id',
+      WECOM_BOT_SECRET: 'parent-bot-secret'
+    },
     spawnImpl(command, args, options) {
       invocation = { command, args, options };
       return child;
@@ -263,6 +267,8 @@ test('manual auth keeps Bot credentials out of argv, env, and output', async () 
   assert.deepEqual(invocation.args, ['/secure/manual-auth.py']);
   assert.equal(invocation.options.shell, undefined);
   assert.equal(JSON.stringify(invocation.args).includes('secret-sensitive'), false);
+  assert.equal(invocation.options.env.WECOM_BOT_ID, undefined);
+  assert.equal(invocation.options.env.WECOM_BOT_SECRET, undefined);
   assert.equal(JSON.stringify(invocation.options.env).includes('secret-sensitive'), false);
   const payload = JSON.parse(invocation.stdin);
   assert.equal(payload.bot_id, 'bot-sensitive');
@@ -293,6 +299,8 @@ import os
 import sys
 if "WECOM_BOT_SECRET" in os.environ:
     raise SystemExit(3)
+if "WECOM_BOT_ID" in os.environ:
+    raise SystemExit(4)
 sys.stdout.write("Bot ID: ")
 sys.stdout.flush()
 bot_id = sys.stdin.readline().strip()
@@ -302,7 +310,9 @@ secret = sys.stdin.readline().strip()
 raise SystemExit(0 if bot_id == "bot-test" and secret == "secret-test" else 2)
 `, { mode: 0o700 });
 
+    const previousBotId = process.env.WECOM_BOT_ID;
     const previousSecret = process.env.WECOM_BOT_SECRET;
+    process.env.WECOM_BOT_ID = 'parent-environment-bot-id';
     process.env.WECOM_BOT_SECRET = 'parent-environment-secret';
     try {
       await runOfficialWecomCliManualAuth({
@@ -312,6 +322,8 @@ raise SystemExit(0 if bot_id == "bot-test" and secret == "secret-test" else 2)
         timeoutSeconds: 5
       });
     } finally {
+      if (previousBotId === undefined) delete process.env.WECOM_BOT_ID;
+      else process.env.WECOM_BOT_ID = previousBotId;
       if (previousSecret === undefined) delete process.env.WECOM_BOT_SECRET;
       else process.env.WECOM_BOT_SECRET = previousSecret;
     }

@@ -16,6 +16,7 @@ const MANUAL_AUTH_HELPER = path.resolve(MODULE_DIR, '../../scripts/wecom-cli-man
 
 export function createWecomCliChildEnv(env = process.env) {
   const childEnv = { ...env };
+  delete childEnv.WECOM_BOT_ID;
   delete childEnv.WECOM_BOT_SECRET;
   return childEnv;
 }
