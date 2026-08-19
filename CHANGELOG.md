@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-19
+
 ### Added
 - Pinned official `wecom-cli` install/upgrade integration with version checks
 - Fourteen modular official CLI skills and the WeCom Unified aggregate router
