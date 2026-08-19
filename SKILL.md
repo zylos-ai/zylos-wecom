@@ -1,6 +1,6 @@
 ---
 name: wecom
-version: 0.1.5
+version: 0.2.0
 description: >-
   WeCom (企业微信) communication channel via WebSocket long connection
   (智能机器人长连接模式). No public IP or SSL required. Use when:
