@@ -1,5 +1,10 @@
 import { execFileSync } from 'child_process';
 
+import {
+  checkWecomCliAuthMatchesBot,
+  createWecomCliChildEnv
+} from './wecom-cli-auth.js';
+
 const AUTH_ERROR_CODE = 893201;
 const OFFICE_MESSAGE_COMMAND = 'message';
 const ROUTE_LOG_PREFIX = '[zylos-wecom]';
@@ -23,6 +28,14 @@ export class WecomCliRouteViolationError extends Error {
     );
     this.name = 'WecomCliRouteViolationError';
     this.code = 'WECOM_CLI_ROUTE_VIOLATION';
+  }
+}
+
+export class WecomCliPrincipalMismatchError extends Error {
+  constructor() {
+    super('wecom-cli is not authorized as the configured WeCom channel Bot');
+    this.name = 'WecomCliPrincipalMismatchError';
+    this.code = 'WECOM_CLI_PRINCIPAL_MISMATCH';
   }
 }
 
@@ -68,6 +81,8 @@ export function runWecomCli(args, options = {}) {
     ...execOptions
   } = options;
 
+  const childEnv = createWecomCliChildEnv(execOptions.env || process.env);
+
   if (
     args[0] === OFFICE_MESSAGE_COMMAND &&
     intent !== EXPLICIT_OFFICE_MESSAGE_INTENT
@@ -77,11 +92,27 @@ export function runWecomCli(args, options = {}) {
     throw error;
   }
 
+  let matchesChannelBot = false;
+  try {
+    matchesChannelBot = checkWecomCliAuthMatchesBot(
+      process.env.WECOM_BOT_ID,
+      exec,
+      { env: childEnv }
+    );
+  } catch {
+    // Fail closed: a missing CLI, unreadable ledger, or malformed response must
+    // never allow a business command to run.
+  }
+  if (!matchesChannelBot) {
+    throw new WecomCliPrincipalMismatchError();
+  }
+
   try {
     return exec('wecom-cli', args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-      ...execOptions
+      ...execOptions,
+      env: childEnv
     });
   } catch (error) {
     const combined = `${String(error.stdout || '')}${String(error.stderr || '')}`;

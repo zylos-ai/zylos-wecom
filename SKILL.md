@@ -95,14 +95,30 @@ the managed owner-DM helper below exclusively owns authorization. The vendored
 domain commands, parameters, safety checks, and output rules remain
 authoritative for office operations.
 
-Authorization is separate from the WebSocket channel. If
-`wecom-cli auth show --status` reports `unauthorized`, use this WeCom-only
-authorization flow:
+The CLI keeps a separate encrypted authorization ledger, but it can authorize
+the same Bot credentials used by the WebSocket channel. Before any CLI business
+operation, run `node scripts/wecom-cli-auth.js --check-channel-bot`. Continue
+only when it reports `same_bot_authorized`. Treat `reauthorization_required`
+the same as unauthorized even if a stale ledger for another Bot exists, then
+use this WeCom-only authorization flow:
 
 1. Authorization may be started only from a private WeCom DM sent by the
    configured owner. Never authorize from a group or for a non-owner. Ask the
    owner to DM the bot when an unauthorized request originates in a group.
-2. Run `node scripts/wecom-cli-auth.js --endpoint <exact-wecom-reply-endpoint>`
+2. Prefer the same-Bot path by running
+   `node scripts/wecom-cli-auth.js --reuse-channel-bot --endpoint <exact-wecom-reply-endpoint>`.
+   It feeds the configured `WECOM_BOT_ID` / `WECOM_BOT_SECRET` to the official
+   CLI's manual authorization through a PTY. The Secret never appears in argv,
+   environment variables, stdout, stderr, or logs. After authorization, the
+   helper requires the official CLI's reported Bot ID to exactly match the
+   configured WebSocket Bot before it reports success.
+3. The helper atomically consumes the short-lived, one-time provenance record;
+   a reconstructed, changed, group, non-owner, expired, or replayed endpoint is
+   rejected before any send or CLI execution. No QR is generated and no new Bot
+   is created by this same-Bot path.
+4. Use the QR command below only as an explicit fallback when the owner chooses
+   an independent office Bot instead of the same WebSocket Bot:
+   `node scripts/wecom-cli-auth.js --endpoint <exact-wecom-reply-endpoint>`
    as a managed process. The WebSocket server records that exact owner-DM
    reply endpoint before forwarding the message to C4. The helper atomically
    consumes the short-lived, one-time provenance record; a reconstructed,
@@ -111,7 +127,7 @@ authorization flow:
    then starts the official CLI, keeps C4 responsive, returns the temporary
    official link and PNG through that exact endpoint, and polls for up to five
    minutes.
-3. A successful helper result is JSON with `status: "authorized"` and
+5. A successful helper result is JSON with `status: "authorized"` and
    `retryOriginalOperation: true`. Retry the original office operation once.
    On expiry or failure, report the helper's safe error and wait for the owner
    to retry; do not loop or route authorization through another channel.
