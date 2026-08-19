@@ -289,7 +289,10 @@ test('manual auth PTY helper completes an interactive CLI without exposing input
   const fakeCli = path.join(root, 'fake-wecom-cli.py');
   try {
     fs.writeFileSync(fakeCli, `#!/usr/bin/env python3
+import os
 import sys
+if "WECOM_BOT_SECRET" in os.environ:
+    raise SystemExit(3)
 sys.stdout.write("Bot ID: ")
 sys.stdout.flush()
 bot_id = sys.stdin.readline().strip()
@@ -299,12 +302,47 @@ secret = sys.stdin.readline().strip()
 raise SystemExit(0 if bot_id == "bot-test" and secret == "secret-test" else 2)
 `, { mode: 0o700 });
 
-    await runOfficialWecomCliManualAuth({
-      botId: 'bot-test',
-      secret: 'secret-test',
-      cliPath: fakeCli,
-      timeoutSeconds: 5
-    });
+    const previousSecret = process.env.WECOM_BOT_SECRET;
+    process.env.WECOM_BOT_SECRET = 'parent-environment-secret';
+    try {
+      await runOfficialWecomCliManualAuth({
+        botId: 'bot-test',
+        secret: 'secret-test',
+        cliPath: fakeCli,
+        timeoutSeconds: 5
+      });
+    } finally {
+      if (previousSecret === undefined) delete process.env.WECOM_BOT_SECRET;
+      else process.env.WECOM_BOT_SECRET = previousSecret;
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('manual auth timeout escalates to SIGKILL when the CLI ignores SIGTERM', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-manual-auth-timeout-'));
+  const fakeCli = path.join(root, 'ignore-term.py');
+  try {
+    fs.writeFileSync(fakeCli, `#!/usr/bin/env python3
+import signal
+import time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+`, { mode: 0o700 });
+
+    const startedAt = Date.now();
+    await assert.rejects(
+      runOfficialWecomCliManualAuth({
+        botId: 'bot-test',
+        secret: 'secret-test',
+        cliPath: fakeCli,
+        timeoutSeconds: 1
+      }),
+      (error) => error.code === 'auth_timeout'
+    );
+    assert.ok(Date.now() - startedAt < 4000);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

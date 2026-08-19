@@ -10,9 +10,39 @@ import sys
 import time
 
 
+TERM_GRACE_SECONDS = 1.0
+
+
 def fail(code):
     print(json.dumps({"ok": False, "error": code}), flush=True)
     return 1
+
+
+def terminate_and_reap(pid, grace_seconds=TERM_GRACE_SECONDS):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return None
+
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return None
+        if waited_pid == pid:
+            return status
+        time.sleep(0.05)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        _, status = os.waitpid(pid, 0)
+        return status
+    except ChildProcessError:
+        return None
 
 
 def main():
@@ -32,7 +62,9 @@ def main():
 
     pid, master_fd = pty.fork()
     if pid == 0:
-        os.execvpe(cli_path, [cli_path, "auth", "init", "--manual"], os.environ)
+        child_env = os.environ.copy()
+        child_env.pop("WECOM_BOT_SECRET", None)
+        os.execvpe(cli_path, [cli_path, "auth", "init", "--manual"], child_env)
 
     def terminate_child(_signum, _frame):
         try:
@@ -75,11 +107,7 @@ def main():
                 break
 
         if status is None:
-            try:
-                os.kill(pid, 15)
-            except ProcessLookupError:
-                pass
-            _, status = os.waitpid(pid, 0)
+            terminate_and_reap(pid)
             return fail("auth_timeout")
 
         exit_code = os.waitstatus_to_exitcode(status)

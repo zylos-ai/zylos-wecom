@@ -14,6 +14,12 @@ const ENDPOINT_LOG_PREFIX = '[zylos-wecom]';
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MANUAL_AUTH_HELPER = path.resolve(MODULE_DIR, '../../scripts/wecom-cli-manual-auth-pty.py');
 
+export function createWecomCliChildEnv(env = process.env) {
+  const childEnv = { ...env };
+  delete childEnv.WECOM_BOT_SECRET;
+  return childEnv;
+}
+
 export class WecomCliAuthFlowError extends Error {
   constructor(code, message) {
     super(message);
@@ -227,7 +233,7 @@ export function runOfficialWecomCliAuth(options) {
       qrFileName
     ], {
       cwd: options.cwd,
-      env: process.env,
+      env: createWecomCliChildEnv(options.env || process.env),
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -299,7 +305,7 @@ export function runOfficialWecomCliManualAuth(options) {
     const child = spawnImpl(options.pythonPath || 'python3', [
       options.helperPath || MANUAL_AUTH_HELPER
     ], {
-      env: options.env || process.env,
+      env: createWecomCliChildEnv(options.env || process.env),
       stdio: ['pipe', 'pipe', 'pipe']
     });
     let stdout = '';
@@ -338,7 +344,7 @@ export function checkWecomCliAuthStatus(exec = execFileSync, options = {}) {
   const output = exec('wecom-cli', ['auth', 'show', '--status'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: options.env || process.env
+    env: createWecomCliChildEnv(options.env || process.env)
   }).trim();
   return output === 'authorized';
 }
@@ -348,7 +354,7 @@ export function checkWecomCliAuthMatchesBot(expectedBotId, exec = execFileSync, 
   const output = exec('wecom-cli', ['auth', 'show'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: options.env || process.env
+    env: createWecomCliChildEnv(options.env || process.env)
   });
   const status = String(output).match(/^Status:\s*(\S+)\s*$/m)?.[1];
   const botId = String(output).match(/^Bot ID:\s*(\S+)\s*$/m)?.[1];
