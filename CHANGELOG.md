@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-08-25
 
 ### Added
 - Group quoted file/image parsing: when a user replies-to a file/image and
