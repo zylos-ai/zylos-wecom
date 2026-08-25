@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { redact, redactString, redactJson, isSensitiveKey } from './redact.js';
+import { redact, redactString, redactJson, isSensitiveKey, isBulkPayloadKey } from './redact.js';
 
 test('masks sensitive object keys case-insensitively', () => {
   const input = {
@@ -110,6 +110,40 @@ test('handles circular references without throwing', () => {
   const out = redact(a);
   assert.equal(out.name, 'a');
   assert.equal(out.self, '[Circular]');
+});
+
+test('redacts base64 bulk payload keeping only a size summary', () => {
+  // The reviewer's exact probe: an outbound aibot_upload_media_chunk frame.
+  const frame = {
+    cmd: 'aibot_upload_media_chunk',
+    body: { base64_data: 'QUJDREVGRw==', aeskey: 'KEY', url: 'https://x?sign=SIG&expires=1' }
+  };
+  const out = redact(frame);
+  // Payload content gone, size summary kept.
+  assert.equal(out.body.base64_data, '***(12 base64 chars)');
+  assert.ok(!JSON.stringify(out).includes('QUJDREVGRw=='));
+  // Sibling secrets still masked as before.
+  assert.equal(out.body.aeskey, '***');
+  assert.ok(out.body.url.includes('sign=***'));
+  assert.ok(out.body.url.includes('expires=1'));
+});
+
+test('redactJson never leaks a base64 media chunk payload', () => {
+  const bigPayload = 'A'.repeat(50000);
+  const json = redactJson({ cmd: 'aibot_upload_media_chunk', body: { chunk_index: 3, base64_data: bigPayload } });
+  assert.ok(!json.includes(bigPayload));
+  assert.ok(json.includes('***(50000 base64 chars)'));
+  // Non-payload metadata stays visible for diagnostics.
+  assert.ok(json.includes('chunk_index'));
+  assert.ok(json.includes('aibot_upload_media_chunk'));
+});
+
+test('bulk payload matching covers common base64 field variants', () => {
+  assert.equal(isBulkPayloadKey('base64_data'), true);
+  assert.equal(isBulkPayloadKey('image_base64'), true);
+  assert.equal(isBulkPayloadKey('Base64'), true);
+  assert.equal(isBulkPayloadKey('content'), false);
+  assert.equal(isBulkPayloadKey('chunk_index'), false);
 });
 
 test('isSensitiveKey matches expected key names', () => {

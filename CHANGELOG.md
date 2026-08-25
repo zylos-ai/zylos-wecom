@@ -18,7 +18,11 @@
   token, authorization, password) and signed-URL secrets (`sign`,
   `q-signature`, `q-ak`, `apikey`, and any secret/token/aeskey param). The
   same redactor is applied to inbound frame debug dumps so no plaintext
-  aeskey, URL signature, secret, or token is ever written to the logs
+  aeskey, URL signature, secret, or token is ever written to the logs. Bulk
+  base64 payload fields (e.g. `base64_data` on outbound
+  `aibot_upload_media_chunk` frames, which carry the raw file/image bytes) are
+  masked down to a `***(<n> base64 chars)` size summary, so media content is
+  never written verbatim and log lines stay small
 
 ## [0.2.0] - 2026-08-19
 
