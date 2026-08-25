@@ -30,6 +30,7 @@ import {
 } from './lib/message-delivery-outbox.js';
 import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
+import { resolveQuote } from './lib/quote-media.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -1339,25 +1340,32 @@ async function processCallback(frame) {
         break;
     }
 
-    // Extract quoted/replied message if present (forwarded as a <replying-to> block)
+    // Extract quoted/replied message if present (forwarded as a <replying-to> block).
+    //
+    // In a GROUP, WeCom never pushes a direct file/image message to the bot
+    // ("single-chat only"); the only way a group file reaches us is when a
+    // user replies-to that file/image AND @-mentions the bot, in which case
+    // the real downloadable handle (url + aeskey) rides along on body.quote.
+    // resolveQuote decides whether the quote is downloadable; if so it fetches
+    // and decrypts it with the same helper used for direct media and forwards
+    // it as this message's media (best-effort: on failure it keeps the
+    // placeholder). Text/voice/video/mixed quotes stay as before.
     let quotedContent = '';
     if (body?.quote) {
-      switch (body.quote.msgtype) {
-        case 'text':
-          quotedContent = body.quote.text?.content || '';
-          break;
-        case 'image':
-          quotedContent = '[image]';
-          break;
-        case 'mixed': {
-          const qItems = body.quote.mixed?.msg_item || body.quote.mixed?.items || [];
-          quotedContent = qItems.map(i => i.msgtype === 'text' ? (i.text?.content || '') : `[${i.msgtype}]`).join(' ');
-          break;
-        }
-        default:
-          quotedContent = `[${body.quote.msgtype || 'unknown'} message]`;
-          break;
-      }
+      const resolvedQuote = await resolveQuote(body.quote, {
+        ownMediaPath: filePath,
+        download: (media) => downloadIncomingMedia(
+          media.url,
+          media.aesKey,
+          media.filename,
+          media.type === 'image' ? 'wecom-image' : 'wecom-file',
+          msgId
+        ),
+        onError: (media, err) =>
+          console.error(`[wecom] Failed to download quoted ${media.type} ${msgId}: ${err.message}`)
+      });
+      quotedContent = resolvedQuote.quotedContent;
+      if (resolvedQuote.mediaPath) filePath = resolvedQuote.mediaPath;
     }
 
     if (!textContent && !quotedContent) return;
