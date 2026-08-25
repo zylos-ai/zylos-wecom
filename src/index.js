@@ -31,6 +31,7 @@ import {
 import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
 import { resolveQuote } from './lib/quote-media.js';
+import { redactJson } from './lib/redact.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -898,6 +899,24 @@ function buildCommand(cmd, body, reqId = crypto.randomUUID()) {
 // ============================================================
 
 /**
+ * Log an outbound frame with all sensitive fields (aeskey, secret, tokens,
+ * signed-URL params) redacted. Every ws.send of an application frame passes
+ * through here so no plaintext secret is ever written to the logs. `data` is
+ * the already-serialized JSON string we are about to put on the wire; heartbeat
+ * pings are skipped to avoid log noise.
+ */
+function logSend(data) {
+  try {
+    const frame = JSON.parse(data);
+    if (frame?.cmd === 'ping' || frame?.cmd === 'pong') return;
+    console.log(`[wecom][send] ${redactJson(frame)}`);
+  } catch {
+    // Never log the raw string on parse failure — it may contain a secret.
+    console.log('[wecom][send] [unparseable frame]');
+  }
+}
+
+/**
  * Low-level send without delivery tracking (for ping, subscribe, welcome).
  */
 function wsSendRaw(data) {
@@ -906,6 +925,7 @@ function wsSendRaw(data) {
     return false;
   }
   try {
+    logSend(data);
     ws.send(data);
     return true;
   } catch (err) {
@@ -931,6 +951,7 @@ function wsSend(data, reqId) {
     pendingSends.set(reqId, { resolve, timer });
 
     try {
+      logSend(data);
       ws.send(data);
     } catch (err) {
       clearTimeout(timer);
@@ -957,6 +978,7 @@ function wsRequest(cmd, body, options = {}) {
     pendingRequestsByReqId.set(reqId, { resolve, timer });
 
     try {
+      logSend(data);
       ws.send(data);
     } catch (err) {
       clearTimeout(timer);
@@ -1346,10 +1368,9 @@ async function processCallback(frame) {
     // ("single-chat only"); the only way a group file reaches us is when a
     // user replies-to that file/image AND @-mentions the bot, in which case
     // the real downloadable handle (url + aeskey) rides along on body.quote.
-    // resolveQuote decides whether the quote is downloadable; if so it fetches
-    // and decrypts it with the same helper used for direct media and forwards
-    // it as this message's media (best-effort: on failure it keeps the
-    // placeholder). Text/voice/video/mixed quotes stay as before.
+    // parseQuote decides whether the quote is downloadable; if so we fetch and
+    // decrypt it with the same helper used for direct media and forward it as
+    // this message's media (best-effort: on failure we keep the placeholder).
     let quotedContent = '';
     if (body?.quote) {
       const resolvedQuote = await resolveQuote(body.quote, {
@@ -1513,7 +1534,7 @@ function connect() {
           void refreshDocMcpConfig().catch(() => {});
         } else {
           console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
-            frame: JSON.stringify(frame)
+            frame: redactJson(frame)
           })}`);
           subscribeReqId = null;
           ws.close();
@@ -1540,7 +1561,7 @@ function connect() {
         if (!ok) {
           console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_body', {
             cmd,
-            body: JSON.stringify(frame.body)
+            body: redactJson(frame.body)
           })}`);
         }
         if (frameReqId) resolvePendingSend(frameReqId, ok, ok ? null : frame.body?.msg);
@@ -1555,7 +1576,7 @@ function connect() {
         const ok = frame.errcode === 0;
         if (!ok) {
           console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_frame', {
-            frame: JSON.stringify(frame)
+            frame: redactJson(frame)
           })}`);
         }
         resolvePendingSend(frameReqId, ok, ok ? null : frame.errmsg);
@@ -1569,7 +1590,7 @@ function connect() {
 
       // Log unknown frames with full content for debugging
       console.log(`[wecom] ${localizedRuntimeMessage('runtime_unknown_frame', {
-        frame: JSON.stringify(frame).substring(0, 500)
+        frame: redactJson(frame).substring(0, 500)
       })}`);
     } catch (err) {
       console.error(`[wecom] ${localizedRuntimeMessage('runtime_parse_failed', { message: err.message })}`);
