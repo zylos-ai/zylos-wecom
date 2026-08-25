@@ -1523,6 +1523,13 @@ function connect() {
       const cmd = frame.cmd;
       const frameReqId = frame.headers?.req_id;
 
+      // Log every inbound frame with sensitive fields (secret/aeskey/token,
+      // signed-URL params) redacted, skipping heartbeat noise, so received
+      // messages stay visible in the logs without leaking secrets.
+      if (cmd !== 'ping' && cmd !== 'pong') {
+        console.log(`[wecom][recv] ${redactJson(frame)}`);
+      }
+
       // Handle authentication response (match by saved subscribeReqId)
       if (cmd === 'aibot_subscribe' || (!cmd && frameReqId === subscribeReqId && !authenticated)) {
         if (frame.errcode === 0 || frame.body?.code === 0) {
