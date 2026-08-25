@@ -1,6 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-08-25
+
+### Added
+- Group quoted file/image parsing: when a user replies-to a file/image and
+  @-mentions the bot in a group, the inbound `body.quote` handle
+  (`url` + `aeskey`) is now downloaded and decrypted via the existing media
+  helper and forwarded to C4 as the message media, with an informative
+  `[quoted file: <name>]` / `[quoted image: <name>]` label. This is the only
+  path by which a group file can reach the bot (WeCom does not push direct
+  file/image messages in groups). Best-effort: download/decrypt failures fall
+  back to the previous placeholder and are logged. Text/voice/video/mixed
+  quotes and single-chat file handling are unchanged
+- Redacted send-path logging: every outbound WebSocket frame is logged as
+  `[wecom][send] <redacted JSON>` with `src/lib/redact.js` masking sensitive
+  object keys (secret, aeskey, apikey/api_key, access_token, refresh_token,
+  token, authorization, password) and signed-URL secrets (`sign`,
+  `q-signature`, `q-ak`, `apikey`, and any secret/token/aeskey param). The
+  same redactor is applied to inbound frame debug dumps so no plaintext
+  aeskey, URL signature, secret, or token is ever written to the logs. Bulk
+  base64 payload fields (e.g. `base64_data` on outbound
+  `aibot_upload_media_chunk` frames, which carry the raw file/image bytes) are
+  masked down to a `***(<n> base64 chars)` size summary, so media content is
+  never written verbatim and log lines stay small
 
 ## [0.2.0] - 2026-08-19
 

@@ -30,6 +30,8 @@ import {
 } from './lib/message-delivery-outbox.js';
 import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
+import { resolveQuote } from './lib/quote-media.js';
+import { redactJson } from './lib/redact.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -897,6 +899,24 @@ function buildCommand(cmd, body, reqId = crypto.randomUUID()) {
 // ============================================================
 
 /**
+ * Log an outbound frame with all sensitive fields (aeskey, secret, tokens,
+ * signed-URL params) redacted. Every ws.send of an application frame passes
+ * through here so no plaintext secret is ever written to the logs. `data` is
+ * the already-serialized JSON string we are about to put on the wire; heartbeat
+ * pings are skipped to avoid log noise.
+ */
+function logSend(data) {
+  try {
+    const frame = JSON.parse(data);
+    if (frame?.cmd === 'ping' || frame?.cmd === 'pong') return;
+    console.log(`[wecom][send] ${redactJson(frame)}`);
+  } catch {
+    // Never log the raw string on parse failure — it may contain a secret.
+    console.log('[wecom][send] [unparseable frame]');
+  }
+}
+
+/**
  * Low-level send without delivery tracking (for ping, subscribe, welcome).
  */
 function wsSendRaw(data) {
@@ -905,6 +925,7 @@ function wsSendRaw(data) {
     return false;
   }
   try {
+    logSend(data);
     ws.send(data);
     return true;
   } catch (err) {
@@ -930,6 +951,7 @@ function wsSend(data, reqId) {
     pendingSends.set(reqId, { resolve, timer });
 
     try {
+      logSend(data);
       ws.send(data);
     } catch (err) {
       clearTimeout(timer);
@@ -956,6 +978,7 @@ function wsRequest(cmd, body, options = {}) {
     pendingRequestsByReqId.set(reqId, { resolve, timer });
 
     try {
+      logSend(data);
       ws.send(data);
     } catch (err) {
       clearTimeout(timer);
@@ -1339,25 +1362,31 @@ async function processCallback(frame) {
         break;
     }
 
-    // Extract quoted/replied message if present (forwarded as a <replying-to> block)
+    // Extract quoted/replied message if present (forwarded as a <replying-to> block).
+    //
+    // In a GROUP, WeCom never pushes a direct file/image message to the bot
+    // ("single-chat only"); the only way a group file reaches us is when a
+    // user replies-to that file/image AND @-mentions the bot, in which case
+    // the real downloadable handle (url + aeskey) rides along on body.quote.
+    // parseQuote decides whether the quote is downloadable; if so we fetch and
+    // decrypt it with the same helper used for direct media and forward it as
+    // this message's media (best-effort: on failure we keep the placeholder).
     let quotedContent = '';
     if (body?.quote) {
-      switch (body.quote.msgtype) {
-        case 'text':
-          quotedContent = body.quote.text?.content || '';
-          break;
-        case 'image':
-          quotedContent = '[image]';
-          break;
-        case 'mixed': {
-          const qItems = body.quote.mixed?.msg_item || body.quote.mixed?.items || [];
-          quotedContent = qItems.map(i => i.msgtype === 'text' ? (i.text?.content || '') : `[${i.msgtype}]`).join(' ');
-          break;
-        }
-        default:
-          quotedContent = `[${body.quote.msgtype || 'unknown'} message]`;
-          break;
-      }
+      const resolvedQuote = await resolveQuote(body.quote, {
+        ownMediaPath: filePath,
+        download: (media) => downloadIncomingMedia(
+          media.url,
+          media.aesKey,
+          media.filename,
+          media.type === 'image' ? 'wecom-image' : 'wecom-file',
+          msgId
+        ),
+        onError: (media, err) =>
+          console.error(`[wecom] Failed to download quoted ${media.type} ${msgId}: ${err.message}`)
+      });
+      quotedContent = resolvedQuote.quotedContent;
+      if (resolvedQuote.mediaPath) filePath = resolvedQuote.mediaPath;
     }
 
     if (!textContent && !quotedContent) return;
@@ -1494,6 +1523,13 @@ function connect() {
       const cmd = frame.cmd;
       const frameReqId = frame.headers?.req_id;
 
+      // Log every inbound frame with sensitive fields (secret/aeskey/token,
+      // signed-URL params) redacted, skipping heartbeat noise, so received
+      // messages stay visible in the logs without leaking secrets.
+      if (cmd !== 'ping' && cmd !== 'pong') {
+        console.log(`[wecom][recv] ${redactJson(frame)}`);
+      }
+
       // Handle authentication response (match by saved subscribeReqId)
       if (cmd === 'aibot_subscribe' || (!cmd && frameReqId === subscribeReqId && !authenticated)) {
         if (frame.errcode === 0 || frame.body?.code === 0) {
@@ -1505,7 +1541,7 @@ function connect() {
           void refreshDocMcpConfig().catch(() => {});
         } else {
           console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
-            frame: JSON.stringify(frame)
+            frame: redactJson(frame)
           })}`);
           subscribeReqId = null;
           ws.close();
@@ -1532,7 +1568,7 @@ function connect() {
         if (!ok) {
           console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_body', {
             cmd,
-            body: JSON.stringify(frame.body)
+            body: redactJson(frame.body)
           })}`);
         }
         if (frameReqId) resolvePendingSend(frameReqId, ok, ok ? null : frame.body?.msg);
@@ -1547,7 +1583,7 @@ function connect() {
         const ok = frame.errcode === 0;
         if (!ok) {
           console.error(`[wecom] ${localizedRuntimeMessage('runtime_send_error_frame', {
-            frame: JSON.stringify(frame)
+            frame: redactJson(frame)
           })}`);
         }
         resolvePendingSend(frameReqId, ok, ok ? null : frame.errmsg);
@@ -1561,7 +1597,7 @@ function connect() {
 
       // Log unknown frames with full content for debugging
       console.log(`[wecom] ${localizedRuntimeMessage('runtime_unknown_frame', {
-        frame: JSON.stringify(frame).substring(0, 500)
+        frame: redactJson(frame).substring(0, 500)
       })}`);
     } catch (err) {
       console.error(`[wecom] ${localizedRuntimeMessage('runtime_parse_failed', { message: err.message })}`);
