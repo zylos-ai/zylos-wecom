@@ -32,6 +32,14 @@ import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
 import { resolveQuote } from './lib/quote-media.js';
 import { redactJson } from './lib/redact.js';
+import {
+  OWNER_GUIDE_TEXT,
+  bindOwnerIfUnbound,
+  evaluateGroupAccess,
+  isOwner as isConfigOwner,
+  renderGroupBlockedNotice,
+  sendNoticeSafely
+} from './lib/access-notice.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -783,8 +791,7 @@ async function recoverPendingDeliveries() {
 // Permission checking
 // ============================================================
 function isOwner(userId) {
-  if (!config.owner?.bound) return false;
-  return String(userId) === String(config.owner.user_id);
+  return isConfigOwner(config, userId);
 }
 
 function checkDmPermission(userId) {
@@ -800,45 +807,44 @@ function checkDmPermission(userId) {
 }
 
 function checkGroupPermission(chatId, userId) {
-  const policy = config.groupPolicy || 'allowlist';
-  if (isOwner(userId)) return true;
-  switch (policy) {
-    case 'disabled': return false;
-    case 'open': return true;
-    case 'allowlist': {
-      const groupConfig = config.groups?.[chatId];
-      if (!groupConfig) return false;
-      // No mention check: WeCom only delivers group callbacks when the bot is
-      // @-mentioned (developer.work.weixin.qq.com/document/path/100719), so a
-      // group callback arriving at all implies the bot was mentioned.
-      // Check allowFrom sender restriction
-      if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
-        if (groupConfig.allowFrom.includes('*')) return true;
-        return groupConfig.allowFrom.some(id => String(id) === String(userId));
-      }
-      return true;
-    }
-    default: return false;
-  }
+  return evaluateGroupAccess(config, chatId, userId);
+}
+
+/**
+ * Reply to a blocked group @-mention with a short notice. WeCom only delivers
+ * group callbacks when the bot is mentioned, so every blocked group callback
+ * was a mention; exactly one notice is sent per callback (duplicate msgids are
+ * already dropped earlier). Fire-and-forget so the callback queue is never held
+ * by a send ack; failures are logged and swallowed.
+ */
+function notifyGroupBlocked(reqId, reason, chatId) {
+  if (!reqId) return;
+  sendNoticeSafely(
+    () => sendReply(reqId, renderGroupBlockedNotice(reason)),
+    `group blocked notice (${reason}) to ${chatId}`
+  );
 }
 
 // ============================================================
 // Owner auto-binding
 // ============================================================
 function tryBindOwner(userId, userName) {
-  if (config.owner?.bound) return false;
-
-  config.owner = {
-    bound: true,
-    user_id: String(userId),
-    name: userName || String(userId)
-  };
-
-  if (saveConfig(config)) {
+  const bound = bindOwnerIfUnbound(config, userId, userName, saveConfig);
+  if (bound) {
     console.log(`[wecom] ${t(runtimeLocale(), 'runtime_owner_bound', { userName, userId })}`);
-    return true;
   }
-  return false;
+  return bound;
+}
+
+/**
+ * Send the one-time admin guide to a freshly bound owner. Sent proactively so
+ * the inbound message's reply slot stays available for the agent's answer.
+ */
+function sendOwnerGuide(userId) {
+  sendNoticeSafely(
+    () => sendProactive(resolveChatTarget(userId), OWNER_GUIDE_TEXT),
+    `owner guide to ${userId}`
+  );
 }
 
 // ============================================================
@@ -1257,13 +1263,15 @@ async function processCallback(frame) {
     // Permission check
     const mixedItems = body?.mixed?.msg_item || body?.mixed?.items;
     if (isGroup) {
-      if (!checkGroupPermission(chatId, fromUser)) {
+      const groupAccess = checkGroupPermission(chatId, fromUser);
+      if (!groupAccess.allowed) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
+        notifyGroupBlocked(reqId, groupAccess.reason, chatId);
         return;
       }
     } else {
-      if (!config.owner?.bound) {
-        tryBindOwner(fromUser, senderName);
+      if (!config.owner?.bound && tryBindOwner(fromUser, senderName)) {
+        sendOwnerGuide(fromUser);
       }
       if (!checkDmPermission(fromUser)) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_dm_blocked', {

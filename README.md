@@ -207,6 +207,12 @@ Owner always bypasses all access checks.
 | `allowlist` | Only configured groups are active (default) |
 | `open` | Respond to all groups |
 
+A blocked group @-mention gets one short reply instead of silence:
+「本群还没开通，请联系 Agent 管理者开启」 (group not enabled) or
+「你在本群暂无权限使用我，请联系 Agent 管理者开通」 (group enabled, sender not
+in its `allowFrom`). The first DM sender is bound as owner and receives a
+one-time guide on enabling groups and opening DMs.
+
 ## Architecture
 
 See [DESIGN.md](./DESIGN.md) for detailed architecture documentation.

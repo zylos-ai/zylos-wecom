@@ -290,6 +290,53 @@ name contains spaces, which truncates at the first space).
 First user to send a private message becomes the owner (primary partner).
 Owner always bypasses all access checks regardless of policy settings.
 
+Right after the bind, the component sends the new owner a one-time private
+guide (Chinese only; sent once, on the bind event only):
+
+```
+你已成为这个 Agent 的管理者。
+开启群聊：把我拉进群后，在群里 @我 说「开启本群」。
+开放私聊：跟我说「允许所有同事私聊你」，或「允许某某私聊你」。
+```
+
+This is independent of the `enter_chat` welcome message
+(`message.welcome_texts` / `message.welcome_text`), which is still sent
+unchanged when configured.
+
+### Owner Admin Phrases
+
+When the owner says one of the phrases from the guide, fulfil it with the
+Admin CLI (`ADM` as defined above). **Only the owner may trigger these.**
+Verify the sender is the owner (`$ADM show-owner`; in a DM the reply-via
+endpoint starts with the sender's userid) before changing anything; if a
+non-owner asks, decline and tell them to contact the Agent's admin. Note: in a
+group that is not yet enabled, the component blocks every non-owner mention
+before it reaches you, so such a request can only come from the owner — but
+still check the sender name against `show-owner` when the group is already
+enabled or `groupPolicy` is `open`.
+
+| Owner says | Action |
+|------------|--------|
+| 「开启本群」 (in a group, @-mentioning the bot) | `$ADM add-group <chat_id> <name>` — `chat_id` is the first segment of the reply-via endpoint (`<chat_id>\|type:group\|msg:...`); use the group's name if known, otherwise a descriptive name. If `groupPolicy` is `disabled`, also run `$ADM set-group-policy allowlist` (enables configured groups only). |
+| 「允许所有同事私聊你」 | `$ADM set-dm-policy open` |
+| 「允许某某私聊你」 | Resolve 某某 to a WeCom userid (`user-cache.json` in the data directory maps userid -> name for people who have messaged the bot; otherwise use the official CLI contacts domain). If ambiguous or not found, ask the owner for the userid. Then `$ADM add-dm-allow <user_id>`; if `dmPolicy` is `owner`, also run `$ADM set-dm-policy allowlist` (leave `open` unchanged). |
+
+Config changes are hot-reloaded by the running service; confirm the result to
+the owner in the same chat.
+
+### Blocked Group Mentions
+
+WeCom only delivers group callbacks when the bot is @-mentioned, so every
+blocked group callback was a mention. The component replies once per blocked
+mention (Chinese only), and the message is not forwarded to the agent:
+
+- Group not enabled (`groupPolicy` is `disabled`, or `allowlist` and the group
+  is not configured): 「本群还没开通，请联系 Agent 管理者开启」
+- Group enabled but the sender is not in that group's `allowFrom`:
+  「你在本群暂无权限使用我，请联系 Agent 管理者开通」
+
+Send failures are logged and ignored.
+
 ## Access Control
 
 ### Permission Flow

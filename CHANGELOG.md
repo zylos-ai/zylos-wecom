@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Blocked group @-mention notice (OPENM-1149): a group mention blocked by
+  access control now gets one reply instead of being dropped silently —
+  「本群还没开通，请联系 Agent 管理者开启」 when the group is not enabled
+  (`groupPolicy` `disabled`, or `allowlist` with the group not configured),
+  or 「你在本群暂无权限使用我，请联系 Agent 管理者开通」 when the group is
+  enabled but the sender is not in its `allowFrom`. Sent fire-and-forget via
+  the callback's reply `req_id`; send failures are logged and swallowed.
+  Parity with zylos-lark / zylos-telegram
+- One-time owner guide: right after the first DM binds the owner, the bot
+  privately sends a short guide on enabling groups (「开启本群」) and opening
+  DMs (「允许所有同事私聊你」 / 「允许某某私聊你」). SKILL.md maps these
+  phrases to the owner-only admin commands (`add-group`, `set-dm-policy`,
+  `add-dm-allow`). Both texts are Chinese-only by design
+- Group access evaluation and owner binding moved to `src/lib/access-notice.js`
+  with unit tests
+
 ## [0.3.0] - 2026-08-25
 
 ### Added
