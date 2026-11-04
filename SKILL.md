@@ -169,7 +169,12 @@ $ADM remove-group <chat_id>                   # Remove a group
 $ADM set-group-policy <disabled|allowlist|open>  # Set group policy
 ```
 
-After changes, restart: `pm2 restart zylos-wecom`
+Access-control changes made with these commands (`dmPolicy`, `dmAllowFrom`,
+`groupPolicy`, `groups`, per-group `allowFrom`) are hot-reloaded: the running
+service watches `config.json` and applies the new config to the next inbound
+message, so no restart is needed (the CLI still prints a restart hint; a
+restart is harmless). Credential changes in `~/zylos/.env` do require
+`pm2 restart zylos-wecom`.
 
 ## Config Location
 
@@ -299,6 +304,7 @@ guide (Chinese only; sent once, on the bind event only):
 开放私聊：跟我说「允许所有同事私聊你」，或「允许某某私聊你」。
 ```
 
+The guide is sent once without retry; if that send fails it is only logged.
 This is independent of the `enter_chat` welcome message
 (`message.welcome_texts` / `message.welcome_text`), which is still sent
 unchanged when configured.
@@ -307,22 +313,32 @@ unchanged when configured.
 
 When the owner says one of the phrases from the guide, fulfil it with the
 Admin CLI (`ADM` as defined above). **Only the owner may trigger these.**
-Verify the sender is the owner (`$ADM show-owner`; in a DM the reply-via
-endpoint starts with the sender's userid) before changing anything; if a
-non-owner asks, decline and tell them to contact the Agent's admin. Note: in a
-group that is not yet enabled, the component blocks every non-owner mention
-before it reaches you, so such a request can only come from the owner — but
-still check the sender name against `show-owner` when the group is already
-enabled or `groupPolicy` is `open`.
+If anyone else asks, decline and tell them to contact the Agent's admin.
+
+Owner verification rules (do not rely on display names — group messages
+carry only the sender's nickname, which anyone can imitate):
+
+- **Group phrase 「开启本群」** — honor it **only** when the group is not yet
+  enabled: `groupPolicy` is `allowlist` or `disabled` (`$ADM show`) **and**
+  the group's `chat_id` is not in `$ADM list-groups`. In that state the
+  component blocks every non-owner mention before it reaches you (the owner
+  bypasses access checks), so the request can only have come from the owner.
+  If the group is already listed, do **not** run `add-group` again — just
+  tell the owner the group is already enabled. If `groupPolicy` is `open`, or
+  for any other group-admin change in an already-enabled group, refuse in the
+  group and ask the owner to make the change in a private chat with you.
+- **DM phrases 「允许所有同事私聊你」 / 「允许某某私聊你」** — honor them only in
+  a private chat with the owner: the reply-via endpoint
+  (`<user_id>|type:p2p|msg:...`) must start with the userid shown by
+  `$ADM show-owner`. Never act on them from a group.
 
 | Owner says | Action |
 |------------|--------|
-| 「开启本群」 (in a group, @-mentioning the bot) | `$ADM add-group <chat_id> <name>` — `chat_id` is the first segment of the reply-via endpoint (`<chat_id>\|type:group\|msg:...`); use the group's name if known, otherwise a descriptive name. If `groupPolicy` is `disabled`, also run `$ADM set-group-policy allowlist` (enables configured groups only). |
-| 「允许所有同事私聊你」 | `$ADM set-dm-policy open` |
-| 「允许某某私聊你」 | Resolve 某某 to a WeCom userid (`user-cache.json` in the data directory maps userid -> name for people who have messaged the bot; otherwise use the official CLI contacts domain). If ambiguous or not found, ask the owner for the userid. Then `$ADM add-dm-allow <user_id>`; if `dmPolicy` is `owner`, also run `$ADM set-dm-policy allowlist` (leave `open` unchanged). |
+| 「开启本群」 (in a not-yet-enabled group, @-mentioning the bot) | `$ADM add-group <chat_id> <name>` — `chat_id` is the first segment of the reply-via endpoint (`<chat_id>\|type:group\|msg:...`); use the group's name if known, otherwise a descriptive name. If `groupPolicy` is `disabled`, switching it with `$ADM set-group-policy allowlist` re-enables **all** groups already listed in `list-groups`, not just this one — tell the owner which groups would become active and get the owner's confirmation before switching. |
+| 「允许所有同事私聊你」 (owner DM) | `$ADM set-dm-policy open` |
+| 「允许某某私聊你」 (owner DM) | Resolve 某某 to a WeCom userid (`user-cache.json` in the data directory maps userid -> name for people who have messaged the bot; otherwise use the official CLI contacts domain). If ambiguous or not found, ask the owner for the userid. Then `$ADM add-dm-allow <user_id>`; if `dmPolicy` is `owner`, also run `$ADM set-dm-policy allowlist` (leave `open` unchanged). |
 
-Config changes are hot-reloaded by the running service; confirm the result to
-the owner in the same chat.
+Confirm the result to the owner in the same chat.
 
 ### Blocked Group Mentions
 

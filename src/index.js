@@ -33,12 +33,9 @@ import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.
 import { resolveQuote } from './lib/quote-media.js';
 import { redactJson } from './lib/redact.js';
 import {
-  OWNER_GUIDE_TEXT,
+  applyAccessGate,
   bindOwnerIfUnbound,
-  evaluateGroupAccess,
-  isOwner as isConfigOwner,
-  renderGroupBlockedNotice,
-  sendNoticeSafely
+  isOwner as isConfigOwner
 } from './lib/access-notice.js';
 
 // C4 receive interface path
@@ -794,37 +791,6 @@ function isOwner(userId) {
   return isConfigOwner(config, userId);
 }
 
-function checkDmPermission(userId) {
-  if (isOwner(userId)) return true;
-  const policy = config.dmPolicy || 'owner';
-  switch (policy) {
-    case 'open': return true;
-    case 'owner': return false;
-    case 'allowlist':
-      return (config.dmAllowFrom || []).some(id => String(id) === String(userId));
-    default: return false;
-  }
-}
-
-function checkGroupPermission(chatId, userId) {
-  return evaluateGroupAccess(config, chatId, userId);
-}
-
-/**
- * Reply to a blocked group @-mention with a short notice. WeCom only delivers
- * group callbacks when the bot is mentioned, so every blocked group callback
- * was a mention; exactly one notice is sent per callback (duplicate msgids are
- * already dropped earlier). Fire-and-forget so the callback queue is never held
- * by a send ack; failures are logged and swallowed.
- */
-function notifyGroupBlocked(reqId, reason, chatId) {
-  if (!reqId) return;
-  sendNoticeSafely(
-    () => sendReply(reqId, renderGroupBlockedNotice(reason)),
-    `group blocked notice (${reason}) to ${chatId}`
-  );
-}
-
 // ============================================================
 // Owner auto-binding
 // ============================================================
@@ -834,17 +800,6 @@ function tryBindOwner(userId, userName) {
     console.log(`[wecom] ${t(runtimeLocale(), 'runtime_owner_bound', { userName, userId })}`);
   }
   return bound;
-}
-
-/**
- * Send the one-time admin guide to a freshly bound owner. Sent proactively so
- * the inbound message's reply slot stays available for the agent's answer.
- */
-function sendOwnerGuide(userId) {
-  sendNoticeSafely(
-    () => sendProactive(resolveChatTarget(userId), OWNER_GUIDE_TEXT),
-    `owner guide to ${userId}`
-  );
 }
 
 // ============================================================
@@ -1262,24 +1217,24 @@ async function processCallback(frame) {
 
     // Permission check
     const mixedItems = body?.mixed?.msg_item || body?.mixed?.items;
-    if (isGroup) {
-      const groupAccess = checkGroupPermission(chatId, fromUser);
-      if (!groupAccess.allowed) {
+    const gate = applyAccessGate(
+      { config, isGroup, chatId, userId: fromUser, userName: senderName, reqId },
+      {
+        sendReply,
+        sendProactive: (userId, text) => sendProactive(resolveChatTarget(userId), text),
+        bindOwner: tryBindOwner
+      }
+    );
+    if (!gate.allowed) {
+      if (isGroup) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
-        notifyGroupBlocked(reqId, groupAccess.reason, chatId);
-        return;
-      }
-    } else {
-      if (!config.owner?.bound && tryBindOwner(fromUser, senderName)) {
-        sendOwnerGuide(fromUser);
-      }
-      if (!checkDmPermission(fromUser)) {
+      } else {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_dm_blocked', {
           senderName,
           userId: fromUser
         })}`);
-        return;
       }
+      return;
     }
 
     // Extract message content

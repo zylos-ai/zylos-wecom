@@ -6,8 +6,8 @@
  *   answered with the right notice instead of being dropped silently.
  * - One-time owner guide sent right after the first DM binds the owner.
  *
- * User-facing texts are intentionally Chinese-only (owner decision for
- * OPENM-1149); they are not switched by runtime locale.
+ * User-facing texts are intentionally Chinese-only (owner decision); they are
+ * not switched by runtime locale.
  */
 
 export const GROUP_BLOCK_REASON = Object.freeze({
@@ -48,16 +48,35 @@ export function evaluateGroupAccess(config, chatId, userId) {
         return { allowed: false, reason: GROUP_BLOCK_REASON.NOT_ENABLED };
       }
       const allowFrom = groupConfig.allowFrom;
-      if (Array.isArray(allowFrom) && allowFrom.length > 0) {
-        if (allowFrom.includes('*')) return { allowed: true };
-        if (allowFrom.some(id => String(id) === String(userId))) return { allowed: true };
+      if (allowFrom === undefined || allowFrom === null) return { allowed: true };
+      // Fail closed on a malformed (non-array) allowFrom, e.g. a hand-written
+      // string: treat it as a restriction nobody matches rather than as open.
+      if (!Array.isArray(allowFrom)) {
         return { allowed: false, reason: GROUP_BLOCK_REASON.SENDER_NOT_ALLOWED };
       }
-      return { allowed: true };
+      if (allowFrom.length === 0 || allowFrom.includes('*')) return { allowed: true };
+      if (allowFrom.some(id => String(id) === String(userId))) return { allowed: true };
+      return { allowed: false, reason: GROUP_BLOCK_REASON.SENDER_NOT_ALLOWED };
     }
     case 'disabled':
     default:
       return { allowed: false, reason: GROUP_BLOCK_REASON.NOT_ENABLED };
+  }
+}
+
+export function evaluateDmAccess(config, userId) {
+  if (isOwner(config, userId)) return true;
+  const policy = config?.dmPolicy || 'owner';
+  switch (policy) {
+    case 'open': return true;
+    case 'owner': return false;
+    case 'allowlist': {
+      const allowFrom = config?.dmAllowFrom;
+      // Fail closed on a malformed (non-array) dmAllowFrom.
+      if (!Array.isArray(allowFrom)) return false;
+      return allowFrom.some(id => String(id) === String(userId));
+    }
+    default: return false;
   }
 }
 
@@ -107,4 +126,49 @@ export function sendNoticeSafely(send, label, onError = (msg) => console.error(m
       onError(`[wecom] Failed to send ${label}: ${err?.message || err}`);
       return false;
     });
+}
+
+/**
+ * Inbound access gate for one message callback.
+ *
+ * Group: evaluate access; when blocked, send exactly one notice as a reply to
+ * the callback (WeCom only delivers group callbacks on @-mention, so every
+ * blocked group callback was a mention).
+ * DM: bind the first sender as owner if unbound and, only on that bind event,
+ * send the one-time owner guide; then evaluate DM access. Blocked DMs get no
+ * notice.
+ *
+ * Sends are fire-and-forget (never awaited by the gate, never throw); the
+ * in-flight promise is returned as `notice` so tests can await it.
+ *
+ * deps: { sendReply(reqId, text), sendProactive(userId, text), bindOwner(userId, userName), onError? }
+ * Returns { allowed, reason?, ownerBound, notice }.
+ */
+export function applyAccessGate({ config, isGroup, chatId, userId, userName, reqId }, deps) {
+  const { sendReply, sendProactive, bindOwner, onError } = deps;
+
+  if (isGroup) {
+    const access = evaluateGroupAccess(config, chatId, userId);
+    if (access.allowed) return { allowed: true, ownerBound: false, notice: null };
+    const notice = reqId
+      ? sendNoticeSafely(
+        () => sendReply(reqId, renderGroupBlockedNotice(access.reason)),
+        `group blocked notice (${access.reason}) to ${chatId}`,
+        onError
+      )
+      : null;
+    return { allowed: false, reason: access.reason, ownerBound: false, notice };
+  }
+
+  let ownerBound = false;
+  let notice = null;
+  if (!config.owner?.bound && bindOwner(userId, userName)) {
+    ownerBound = true;
+    notice = sendNoticeSafely(
+      () => sendProactive(userId, OWNER_GUIDE_TEXT),
+      `owner guide to ${userId}`,
+      onError
+    );
+  }
+  return { allowed: evaluateDmAccess(config, userId), ownerBound, notice };
 }

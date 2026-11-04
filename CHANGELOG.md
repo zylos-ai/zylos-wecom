@@ -14,10 +14,16 @@
 - One-time owner guide: right after the first DM binds the owner, the bot
   privately sends a short guide on enabling groups (「开启本群」) and opening
   DMs (「允许所有同事私聊你」 / 「允许某某私聊你」). SKILL.md maps these
-  phrases to the owner-only admin commands (`add-group`, `set-dm-policy`,
-  `add-dm-allow`). Both texts are Chinese-only by design
-- Group access evaluation and owner binding moved to `src/lib/access-notice.js`
-  with unit tests
+  phrases to the owner-only admin commands (`add-group`, `set-group-policy`,
+  `set-dm-policy`, `add-dm-allow`) with owner-verification rules (group
+  phrase only in a not-yet-enabled group; DM phrases only in the owner's DM).
+  Both texts are Chinese-only by design
+- Inbound access gate (group/DM access evaluation, owner binding, notices)
+  moved to `src/lib/access-notice.js` with unit tests
+
+### Changed
+- A non-array per-group `allowFrom` or `dmAllowFrom` (e.g. a hand-written
+  string) now explicitly denies access (fail closed)
 
 ## [0.3.0] - 2026-08-25
 
