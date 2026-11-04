@@ -32,6 +32,11 @@ import { t } from './lib/i18n/cli-messages.js';
 import { resolveRuntimeLocale, resolveWelcomeMessage } from './lib/i18n/runtime.js';
 import { resolveQuote } from './lib/quote-media.js';
 import { redactJson } from './lib/redact.js';
+import {
+  applyAccessGate,
+  bindOwnerIfUnbound,
+  isOwner as isConfigOwner
+} from './lib/access-notice.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -783,62 +788,18 @@ async function recoverPendingDeliveries() {
 // Permission checking
 // ============================================================
 function isOwner(userId) {
-  if (!config.owner?.bound) return false;
-  return String(userId) === String(config.owner.user_id);
-}
-
-function checkDmPermission(userId) {
-  if (isOwner(userId)) return true;
-  const policy = config.dmPolicy || 'owner';
-  switch (policy) {
-    case 'open': return true;
-    case 'owner': return false;
-    case 'allowlist':
-      return (config.dmAllowFrom || []).some(id => String(id) === String(userId));
-    default: return false;
-  }
-}
-
-function checkGroupPermission(chatId, userId) {
-  const policy = config.groupPolicy || 'allowlist';
-  if (isOwner(userId)) return true;
-  switch (policy) {
-    case 'disabled': return false;
-    case 'open': return true;
-    case 'allowlist': {
-      const groupConfig = config.groups?.[chatId];
-      if (!groupConfig) return false;
-      // No mention check: WeCom only delivers group callbacks when the bot is
-      // @-mentioned (developer.work.weixin.qq.com/document/path/100719), so a
-      // group callback arriving at all implies the bot was mentioned.
-      // Check allowFrom sender restriction
-      if (groupConfig.allowFrom && groupConfig.allowFrom.length > 0) {
-        if (groupConfig.allowFrom.includes('*')) return true;
-        return groupConfig.allowFrom.some(id => String(id) === String(userId));
-      }
-      return true;
-    }
-    default: return false;
-  }
+  return isConfigOwner(config, userId);
 }
 
 // ============================================================
 // Owner auto-binding
 // ============================================================
 function tryBindOwner(userId, userName) {
-  if (config.owner?.bound) return false;
-
-  config.owner = {
-    bound: true,
-    user_id: String(userId),
-    name: userName || String(userId)
-  };
-
-  if (saveConfig(config)) {
+  const bound = bindOwnerIfUnbound(config, userId, userName, saveConfig);
+  if (bound) {
     console.log(`[wecom] ${t(runtimeLocale(), 'runtime_owner_bound', { userName, userId })}`);
-    return true;
   }
-  return false;
+  return bound;
 }
 
 // ============================================================
@@ -1256,22 +1217,24 @@ async function processCallback(frame) {
 
     // Permission check
     const mixedItems = body?.mixed?.msg_item || body?.mixed?.items;
-    if (isGroup) {
-      if (!checkGroupPermission(chatId, fromUser)) {
+    const gate = applyAccessGate(
+      { config, isGroup, chatId, userId: fromUser, userName: senderName, reqId },
+      {
+        sendReply,
+        sendProactive: (userId, text) => sendProactive(resolveChatTarget(userId), text),
+        bindOwner: tryBindOwner
+      }
+    );
+    if (!gate.allowed) {
+      if (isGroup) {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_group_blocked', { senderName, chatId })}`);
-        return;
-      }
-    } else {
-      if (!config.owner?.bound) {
-        tryBindOwner(fromUser, senderName);
-      }
-      if (!checkDmPermission(fromUser)) {
+      } else {
         console.log(`[wecom] ${t(runtimeLocale(), 'runtime_dm_blocked', {
           senderName,
           userId: fromUser
         })}`);
-        return;
       }
+      return;
     }
 
     // Extract message content
