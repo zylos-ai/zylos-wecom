@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-04
+
 ### Added
 - Blocked group @-mention notice (OPENM-1149): a group mention blocked by
   access control now gets one reply instead of being dropped silently —
