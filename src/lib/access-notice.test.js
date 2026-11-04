@@ -74,6 +74,28 @@ test('evaluateDmAccess follows dmPolicy and fails closed on malformed dmAllowFro
   assert.equal(evaluateDmAccess({ dmPolicy: 'allowlist', dmAllowFrom: 'u1' }, 'u1'), false);
 });
 
+test('evaluateGroupAccess: unknown groupPolicy -> deny (not enabled)', () => {
+  assert.deepEqual(
+    evaluateGroupAccess({ groupPolicy: 'bogus', groups: { chatA: { name: 'A' } } }, 'chatA', 'u1'),
+    { allowed: false, reason: GROUP_BLOCK_REASON.NOT_ENABLED }
+  );
+});
+
+test('evaluateGroupAccess: allowFrom [] / null / missing -> allow everyone in a configured group', () => {
+  const config = {
+    groupPolicy: 'allowlist',
+    groups: { empty: { allowFrom: [] }, nul: { allowFrom: null }, missing: { name: 'M' } }
+  };
+  for (const chatId of ['empty', 'nul', 'missing']) {
+    assert.deepEqual(evaluateGroupAccess(config, chatId, 'u1'), { allowed: true }, chatId);
+  }
+});
+
+test('evaluateDmAccess: unknown dmPolicy -> deny (owner still allowed)', () => {
+  assert.equal(evaluateDmAccess({ dmPolicy: 'bogus', dmAllowFrom: ['u1'] }, 'u1'), false);
+  assert.equal(evaluateDmAccess({ dmPolicy: 'bogus', owner: OWNER }, 'owner1'), true);
+});
+
 test('evaluateGroupAccess: open policy and owner always allowed', () => {
   assert.deepEqual(evaluateGroupAccess({ groupPolicy: 'open' }, 'chatA', 'u1'), { allowed: true });
   assert.deepEqual(

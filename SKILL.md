@@ -323,8 +323,12 @@ carry only the sender's nickname, which anyone can imitate):
   the group's `chat_id` is not in `$ADM list-groups`. In that state the
   component blocks every non-owner mention before it reaches you (the owner
   bypasses access checks), so the request can only have come from the owner.
-  If the group is already listed, do **not** run `add-group` again — just
-  tell the owner the group is already enabled. If `groupPolicy` is `open`, or
+  If `groupPolicy` is `allowlist` and the group is already listed, do **not**
+  run `add-group` again — just tell the owner the group is already enabled.
+  If `groupPolicy` is `disabled`, a listed group is still blocked: do **not**
+  say it is already enabled; tell the owner that group chat is globally
+  disabled and that switching to `allowlist` re-enables **all** listed groups,
+  and only switch after the owner confirms. If `groupPolicy` is `open`, or
   for any other group-admin change in an already-enabled group, refuse in the
   group and ask the owner to make the change in a private chat with you.
 - **DM phrases 「允许所有同事私聊你」 / 「允许某某私聊你」** — honor them only in
