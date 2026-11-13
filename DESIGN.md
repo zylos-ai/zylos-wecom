@@ -156,10 +156,11 @@ First private message sender becomes the owner:
 7. Cache sender name if available
 8. Replay existing history and format the C4 message
 9. Persist a `pending` delivery record keyed by the stable WeCom `body.msgid`
-10. Forward to C4
+10. Mark `forwarding`, then forward to C4 (in order per conversation,
+    independently across conversations; the callback queue does not wait)
 11. Core has it: append channel history, then persist `delivered`.
-    Rejected or unknown: persist `failed` and notify the user (except when Core
-    already stored it)
+    Rejected or unknown: persist `delivered` with `outcome: "failed"` and
+    notify the user (except when Core already stored it)
 
 ### Restart delivery boundary
 
@@ -173,11 +174,20 @@ automatically retry an uncertain or already committed inbound call"):
   component timeout, and a failure without a structured result is an unknown
   outcome, not permission to resend.
 - Outcomes: success or `persisted` non-empty -> `delivered`; `persisted: []`
-  -> `failed`, user told to try again later; `persisted: null`, no structured
-  result, or a crash -> `failed`, user told the message may not have arrived.
-- A record still `pending` at startup was interrupted with an unknown outcome;
-  it becomes `failed` and is not forwarded again.
+  -> failed, user told to try again later; `persisted: null`, no structured
+  result, or a crash -> failed, user told the message may not have arrived.
+- A call that hangs is no longer waited for after 3 minutes (not killed, not
+  resent): failed, user told it may not have arrived. Its late result is
+  logged. Each conversation has its own delivery queue, so a hang never holds
+  up other chats or the WebSocket callback queue.
+- A `forwarding` marker is written just before c4-receive starts. At startup a
+  pending record without it was only queued and is forwarded; one with it was
+  interrupted with an unknown outcome, is finished as failed, and the user is
+  told (after authentication) that it may not have arrived.
 - A lost `delivered` marker or history write after C4 accepted is logged only.
+- Rollback safety: the journal only uses `pending` and `delivered` (failed is
+  `delivered` with `outcome: "failed"`, the marker is a `pending` event with
+  `forwarding: true`), so v0.4.0 never forwards a failed message again.
 
 Known msgids in any state are suppressed during the 10-minute window that
 covers WeCom's callback retries.

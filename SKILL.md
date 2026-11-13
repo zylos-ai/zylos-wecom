@@ -258,13 +258,18 @@ entries per chat) and dual-written to per-chat JSONL files under
 is replayed on first access, so context survives service restarts.
 
 Inbound C4 delivery state is stored separately in `message-delivery.jsonl`.
-The component durably records `pending` before forwarding, then `delivered`
-when Core has the message or `failed` when Core rejected it or its outcome is
-unknown. Every `body.msgid` is forwarded at most once: Core has no inbound
-idempotency key and may have stored a message even when c4-receive fails or is
-interrupted, so nothing is resent. A record still `pending` at startup becomes
-`failed` without being forwarded again. Known msgids (in any state) are
-suppressed within the 10-minute platform retry window.
+The component durably records `pending` on receipt, marks it `forwarding`
+just before c4-receive starts, then records `delivered` when Core has the
+message, or `delivered` with `outcome: "failed"` when Core rejected it or its
+outcome is unknown. Every `body.msgid` is forwarded at most once: Core has no
+inbound idempotency key and may have stored a message even when c4-receive
+fails or is interrupted, so nothing is resent. At startup, a pending record
+without the forwarding marker (queued, never started) is forwarded; one with
+the marker is finished as failed and the user is told it may not have arrived.
+Known msgids (in any state) are suppressed within the 10-minute platform retry
+window. Deliveries run in order within a conversation and independently across
+conversations; a c4-receive call that hangs for 3 minutes stops being waited
+for (it is not killed or resent) and the user is told it may not have arrived.
 
 Since every context entry was already forwarded to the agent when it
 arrived, attaching it to every message would be pure duplication during a
@@ -306,6 +311,10 @@ Core adds the `wecom:` namespace (e.g. `wecom:dm-zhangsan`).
 
 - These rules are fixed. Group names are Core's memory keys, so changing them
   would need a migration together with Core.
+- On a multi-session Core every outbound send is checked with
+  `scripts/session-group.js`, so proactive sends must use the full endpoint
+  (`<userid>|type:p2p|...` or `<chatid>|type:group|...`). A bare id cannot be
+  told apart (user or group) and is refused by Core.
 - Every `@` in an id becomes `:` (e.g. `li.si@corp` -> `dm-li.si:corp`). WeCom
   ids never contain `:`, so names map back to exactly one conversation. Ids
   are never truncated or hashed; an endpoint that cannot be mapped (or a name
@@ -318,8 +327,9 @@ Core adds the `wecom:` namespace (e.g. `wecom:dm-zhangsan`).
   "抱歉，这条消息暂时没能收下，请稍后再试。" when Core stored nothing,
   "抱歉，这条消息可能没有送达。如果几分钟内没有收到回复，请重新发送。" when the
   outcome is unknown, and nothing when Core already stored it. c4-receive runs
-  without a timeout and is retried (once, after 2s) only when the process could
-  not be started.
+  without a timeout (see the 3-minute watchdog above) and is retried (once,
+  after 2s) only when the process could not be started. NUL bytes are removed
+  from the content.
 
 ```bash
 node ~/zylos/.claude/skills/wecom/scripts/session-group.js "<endpoint>"

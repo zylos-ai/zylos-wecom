@@ -3,12 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { execFile } from 'node:child_process';
 import {
   GENERIC_REJECT_REPLY,
   UNCERTAIN_REPLY,
   buildC4ReceiveArgs,
   c4ReceiveSupportsOption,
-  sendToC4
+  sendToC4,
+  withWatchdog
 } from './c4.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-c4-'));
@@ -112,36 +114,77 @@ test('a process that ran but failed without a result is not retried', async () =
   assert.equal(calls().length, 1);
 });
 
-test('a process that never started is retried once', async () => {
-  setManifest(SUPPORTED);
-  const savedPath = process.env.PATH;
-  process.env.PATH = path.join(tmp, 'no-node-here');
-  try {
-    assert.deepEqual(await send('ok'), { outcome: 'uncertain', notice: UNCERTAIN_REPLY });
-  } finally {
-    process.env.PATH = savedPath;
-  }
-  assert.equal(calls().length, 0);
+const spawnError = () => Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT', syscall: 'spawn' });
 
-  // Restore PATH when the retry is announced: the second attempt delivers once.
-  process.env.PATH = path.join(tmp, 'no-node-here');
+/** execFile that fails to spawn `failures` times, then runs the real fake receiver. */
+function flakySpawn(failures) {
+  let count = 0;
+  const impl = (cmd, args, options, cb) => {
+    count += 1;
+    if (count <= failures) { setImmediate(() => cb(spawnError(), '', '')); return; }
+    execFile(cmd, args, options, cb);
+  };
+  return { impl, attempts: () => count };
+}
+
+async function sendWith(mode, extra) {
+  fs.rmSync(callLog, { force: true });
+  process.env.FAKE_C4_MODE = mode;
+  return sendToC4({ scriptPath, endpoint: ENDPOINT, content: 'hi', logger: quiet, retryDelayMs: 10, ...extra });
+}
+
+test('runs c4-receive with the current Node binary, not PATH lookup', async () => {
+  setManifest(SUPPORTED);
+  let command;
+  const execFileImpl = (cmd, args, options, cb) => { command = cmd; execFile(cmd, args, options, cb); };
+  assert.equal((await sendWith('ok', { execFileImpl })).outcome, 'sent');
+  assert.equal(command, process.execPath);
+});
+
+test('a process that never started is retried once; if it never starts, nothing was stored', async () => {
+  setManifest(SUPPORTED);
+  const twice = flakySpawn(2);
+  assert.deepEqual(await sendWith('ok', { execFileImpl: twice.impl }), { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY });
+  assert.equal(twice.attempts(), 2);
+  assert.deepEqual(calls(), []);
+
+  const once = flakySpawn(1);
   const warnings = [];
-  const logger = { ...quiet, warn: (msg) => { warnings.push(msg); process.env.PATH = savedPath; } };
-  try {
-    assert.deepEqual(await send('ok', { logger }), { outcome: 'sent', notice: null });
-  } finally {
-    process.env.PATH = savedPath;
-  }
-  assert.equal(warnings.length, 1);
+  const logger = { ...quiet, warn: (msg) => warnings.push(msg) };
+  assert.deepEqual(await sendWith('ok', { execFileImpl: once.impl, logger }), { outcome: 'sent', notice: null });
+  assert.equal(once.attempts(), 2);
   assert.match(warnings[0], /did not start/);
   assert.equal(calls().length, 1);
 });
 
-test('content c4-receive cannot be started with (NUL byte) is reported, not thrown or retried', async () => {
+test('NUL bytes are removed from the content instead of failing the message', async () => {
   setManifest(SUPPORTED);
-  fs.rmSync(callLog, { force: true });
-  process.env.FAKE_C4_MODE = 'ok';
-  const result = await sendToC4({ scriptPath, endpoint: ENDPOINT, content: 'a\0b', logger: quiet, retryDelayMs: 10 });
-  assert.deepEqual(result, { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY });
-  assert.deepEqual(calls(), []);
+  assert.deepEqual(await sendWith('ok', { content: 'a\0b' }), { outcome: 'sent', notice: null });
+  assert.equal(calls()[0][calls()[0].indexOf('--content') + 1], 'ab');
+});
+
+test('arguments that cannot be passed are reported, not thrown or retried', async () => {
+  setManifest(SUPPORTED);
+  let attempts = 0;
+  const execFileImpl = () => { attempts += 1; throw Object.assign(new TypeError('bad arg'), { code: 'ERR_INVALID_ARG_VALUE' }); };
+  assert.deepEqual(await sendWith('ok', { execFileImpl }), { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY });
+  assert.equal(attempts, 1);
+});
+
+test('watchdog stops waiting for a hung c4-receive without resending, and logs the late result', async () => {
+  const logs = [];
+  const logger = { error: (m) => logs.push(m), warn: (m) => logs.push(m) };
+  let finish;
+  const hung = new Promise((resolve) => { finish = resolve; });
+  const result = await withWatchdog(hung, { ms: 20, label: 'm1', logger });
+  assert.deepEqual(result, { outcome: 'uncertain', notice: UNCERTAIN_REPLY });
+  assert.match(logs[0], /still running after 20ms/);
+  finish({ outcome: 'sent', notice: null });
+  await new Promise((r) => setImmediate(r));
+  assert.match(logs[1], /finished late: sent/);
+
+  const fast = await withWatchdog(Promise.resolve({ outcome: 'sent', notice: null }), { ms: 20, logger });
+  assert.deepEqual(fast, { outcome: 'sent', notice: null });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(logs.length, 2, 'no watchdog log after a timely result');
 });

@@ -97,7 +97,7 @@ test('server records the exact owner DM reply endpoint before durable C4 deliver
     server,
     /endpoint = `\$\{fromUser\}\|type:p2p\|msg:\$\{msgId\}`;[\s\S]*?recordOwnerReplyEndpoint\(endpoint, config\);[\s\S]*?messageDeliveryOutbox\.enqueue\(\{[\s\S]*?endpoint,[\s\S]*?\}\);[\s\S]*?scheduleOutboxDelivery\(queued\.record\);/
   );
-  assert.match(server, /forward: \(entry\) => sendToC4\(\{ scriptPath: C4_RECEIVE, endpoint: entry\.endpoint, content: entry\.content \}\)/);
+  assert.match(server, /forward: \(entry\) => withWatchdog\(\s*sendToC4\(\{ scriptPath: C4_RECEIVE, endpoint: entry\.endpoint, content: entry\.content \}\)/);
 });
 
 test('upstream snapshots document the component lifecycle override', () => {

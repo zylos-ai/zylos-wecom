@@ -36,10 +36,11 @@ import {
   bindOwnerIfUnbound,
   isOwner as isConfigOwner
 } from './lib/access-notice.js';
-import { sendToC4 } from './lib/c4.js';
+import { GENERIC_REJECT_REPLY, UNCERTAIN_REPLY, sendToC4, withWatchdog } from './lib/c4.js';
 
 // C4 receive interface path
-const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
+const C4_RECEIVE = path.join(process.env.ZYLOS_DIR || path.join(process.env.HOME, 'zylos'),
+  '.claude/skills/comm-bridge/scripts/c4-receive.js');
 
 // State
 let isShuttingDown = false;
@@ -129,7 +130,7 @@ const messageDeliveryOutbox = createMessageDeliveryOutbox({
 });
 const processingMessages = new Map();
 const forwardingMessages = new Set();
-let deliveryQueue = Promise.resolve();
+const deliveryQueues = new Map(); // conversation -> tail of its delivery chain
 
 const dedupCleanupInterval = setInterval(() => {
   const now = Date.now();
@@ -722,7 +723,10 @@ async function deliverOutboxRecord(record) {
   forwardingMessages.add(record.msgId);
   try {
     const result = await messageDeliveryOutbox.deliver(record, {
-      forward: (entry) => sendToC4({ scriptPath: C4_RECEIVE, endpoint: entry.endpoint, content: entry.content }),
+      forward: (entry) => withWatchdog(
+        sendToC4({ scriptPath: C4_RECEIVE, endpoint: entry.endpoint, content: entry.content }),
+        { label: entry.msgId }
+      ),
       recordHistory: (entry) => logAndRecordHistory(entry.historyChatId, entry.historyEntry, { checkDisk: false }),
       onHistoryFailure: (msgId) => {
         console.error(`[wecom] C4 accepted ${msgId} but channel history was not written; it is not forwarded again.`);
@@ -734,7 +738,12 @@ async function deliverOutboxRecord(record) {
     }
     return result.delivered;
   } catch (error) {
-    console.error(`[wecom] Delivery state for ${record.msgId} could not be recorded: ${error.message}. It will not be forwarded again.`);
+    if (error.forwarded === false) {
+      console.error(`[wecom] Message ${record.msgId} was not forwarded: its forwarding state could not be recorded: ${error.message}`);
+      await sendNotice(record.endpoint, record.msgId, GENERIC_REJECT_REPLY);
+    } else {
+      console.error(`[wecom] Delivery state for ${record.msgId} could not be recorded: ${error.message}. It will not be forwarded again.`);
+    }
     return false;
   } finally {
     processingMessages.delete(record.msgId);
@@ -752,25 +761,52 @@ async function sendNotice(endpoint, msgId, text) {
   }
 }
 
+function conversationKey(endpoint) {
+  const [id, ...parts] = String(endpoint).split('|');
+  return `${id}|${parts.find((part) => part.startsWith('type:')) || ''}`;
+}
+
+/**
+ * Deliveries run in receive order within a conversation and independently
+ * across conversations, so one c4-receive call that hangs (bounded by the
+ * watchdog) never holds up other chats or the callback queue.
+ */
 function scheduleOutboxDelivery(record) {
-  const scheduled = deliveryQueue.then(() => deliverOutboxRecord(record));
-  deliveryQueue = scheduled.catch(() => false);
+  const key = conversationKey(record.endpoint);
+  const scheduled = (deliveryQueues.get(key) || Promise.resolve()).then(() => deliverOutboxRecord(record));
+  const tail = scheduled.catch(() => false);
+  deliveryQueues.set(key, tail);
+  void tail.then(() => {
+    if (deliveryQueues.get(key) === tail) deliveryQueues.delete(key);
+  });
   return scheduled;
 }
 
 /**
- * A record still pending at startup was interrupted while being forwarded, or
- * before. Core may already have stored it and has no inbound idempotency key,
- * so it is finished without forwarding it again.
+ * Records still pending at startup. Without the forwarding marker the record
+ * never reached c4-receive (it was queued), so Core cannot have it and it is
+ * forwarded now. With the marker Core may already have stored it and has no
+ * inbound idempotency key, so it is finished as failed and the user is told
+ * it may not have arrived. Runs once, after the first authentication, so
+ * notices can be sent.
  */
-function finishInterruptedDeliveries() {
+let startupRecoveryDone = false;
+async function recoverInterruptedDeliveries() {
+  if (startupRecoveryDone) return;
+  startupRecoveryDone = true;
   for (const record of messageDeliveryOutbox.pendingRecords()) {
+    if (!messageDeliveryOutbox.lookup(record.msgId)?.forwarding) {
+      console.warn(`[wecom] Forwarding message ${record.msgId}, queued but not started before the restart`);
+      void scheduleOutboxDelivery(record);
+      continue;
+    }
     try {
       messageDeliveryOutbox.markFailed(record.msgId, 'interrupted');
-      console.warn(`[wecom] Message ${record.msgId} was interrupted before its C4 outcome was known; not forwarding it again.`);
     } catch (error) {
       console.error(`[wecom] Could not finish interrupted message ${record.msgId}: ${error.message}`);
     }
+    console.warn(`[wecom] Message ${record.msgId} was interrupted while being forwarded; not forwarding it again`);
+    await sendNotice(record.endpoint, record.msgId, UNCERTAIN_REPLY);
   }
 }
 
@@ -1400,7 +1436,8 @@ async function processCallback(frame) {
       console.error(`[wecom] Message ${msgId} was not forwarded because pending state could not be persisted: ${error.message}`);
       return;
     }
-    await scheduleOutboxDelivery(queued.record);
+    // Not awaited: a slow delivery must not hold up other callbacks.
+    void scheduleOutboxDelivery(queued.record);
 
     console.log(`[wecom] ${localizedRuntimeMessage('runtime_message_summary', {
       kind: localizedRuntimeMessage(isGroup ? 'runtime_kind_group' : 'runtime_kind_dm'),
@@ -1490,6 +1527,9 @@ function connect() {
           reconnectDelay = config.ws?.reconnect_initial_delay || 1000;
           console.log(`[wecom] ${t(runtimeLocale(), 'runtime_authenticated')}`);
           startHeartbeat();
+          void recoverInterruptedDeliveries().catch((error) => {
+            console.error(`[wecom] Startup delivery recovery failed: ${error.message}`);
+          });
           void refreshDocMcpConfig().catch(() => {});
         } else {
           console.error(`[wecom] ${t(runtimeLocale(), 'runtime_auth_failed', {
@@ -1719,7 +1759,6 @@ async function handleInternalRequest(url, data, res) {
 // Startup
 // ============================================================
 startInternalServer();
-finishInterruptedDeliveries();
 connect();
 
 console.log(`[wecom] ${localizedRuntimeMessage('runtime_bot_id', { botId: `${creds.bot_id.substring(0, 8)}...` })}`);

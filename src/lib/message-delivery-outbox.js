@@ -3,12 +3,8 @@ import path from 'path';
 
 export const DEFAULT_MESSAGE_DELIVERY_TTL_MS = 10 * 60 * 1000;
 
-const STATES = ['pending', 'delivered', 'failed'];
-
 function eventTime(event) {
-  const value = event.state === 'delivered' ? event.deliveredAt
-    : event.state === 'failed' ? event.failedAt
-      : event.receivedAt;
+  const value = event.state === 'delivered' ? event.deliveredAt : event.receivedAt;
   return Date.parse(value);
 }
 
@@ -42,7 +38,7 @@ export function createMessageDeliveryOutbox({
 
   function prune(referenceTime = now()) {
     for (const [msgId, state] of states) {
-      if (state.state === 'pending') continue;
+      if (state.state !== 'delivered') continue;
       const timestamp = eventTime(state);
       if (!Number.isFinite(timestamp) || referenceTime - timestamp > ttlMs) {
         states.delete(msgId);
@@ -71,7 +67,7 @@ export function createMessageDeliveryOutbox({
         onError(`unable to parse delivery journal line ${index + 1}: ${error.message}`);
         continue;
       }
-      if (!event?.msgId || !STATES.includes(event.state)) {
+      if (!event?.msgId || !['pending', 'delivered'].includes(event.state)) {
         onError(`invalid delivery journal event at line ${index + 1}`);
         continue;
       }
@@ -111,9 +107,29 @@ export function createMessageDeliveryOutbox({
   }
 
   /**
-   * Finish a pending message without delivering it again: Core rejected it,
+   * Record that forwarding of a pending message is about to start. A record
+   * still pending at startup without this marker never reached c4-receive and
+   * can be forwarded safely; with it, Core may already have stored it.
+   * Written as a `pending` event so older versions still read the journal.
+   */
+  function markForwarding(msgId) {
+    const id = String(msgId);
+    const current = states.get(id);
+    if (!current || current.state !== 'pending') {
+      throw new Error(`cannot mark non-pending message forwarding: ${id}`);
+    }
+    const event = { ...current, forwarding: true };
+    appendEvent(event);
+    states.set(id, event);
+    return event;
+  }
+
+  /**
+   * Finish a pending message without forwarding it (again): Core rejected it,
    * or its outcome is unknown. Core has no inbound idempotency key, so a
-   * message that may already be stored is never resent.
+   * message that may already be stored is never resent. Written as a
+   * `delivered` event with `outcome: 'failed'` so that older versions, which
+   * only know pending/delivered, also never forward it again.
    */
   function markFailed(msgId, reason) {
     const id = String(msgId);
@@ -123,11 +139,12 @@ export function createMessageDeliveryOutbox({
     }
     const event = {
       version: 1,
-      state: 'failed',
-      msgId: id,
+      state: 'delivered',
+      outcome: 'failed',
       reason: String(reason),
+      msgId: id,
       receivedAt: current.receivedAt,
-      failedAt: new Date(now()).toISOString(),
+      deliveredAt: new Date(now()).toISOString(),
       record: current.record
     };
     appendEvent(event);
@@ -141,7 +158,7 @@ export function createMessageDeliveryOutbox({
       const msgId = String(record.msgId);
       prune();
       const existing = states.get(msgId);
-      if (existing && existing.state !== 'pending') {
+      if (existing?.state === 'delivered') {
         onDuplicate(msgId);
         return { status: 'duplicate', record: existing.record || record };
       }
@@ -159,20 +176,30 @@ export function createMessageDeliveryOutbox({
 
     markDelivered,
 
+    markForwarding,
+
     markFailed,
 
     /**
      * Forward a pending record once and record the outcome. `forward` resolves
-     * to `{ outcome, notice }` (see sendToC4). When Core has the message
-     * (sent / committed) channel history is written and the record becomes
-     * delivered; otherwise it becomes failed. Either way it is never resent.
-     * A history write failure after Core accepted is only reported: resending
-     * would deliver the message twice.
+     * to `{ outcome, notice }` (see sendToC4). The forwarding marker is written
+     * first; if it cannot be written the record is not forwarded (error with
+     * `forwarded: false`). When Core has the message (sent / committed) channel
+     * history is written and the record becomes delivered; otherwise it is
+     * finished as failed. Either way it is never resent. A history write
+     * failure after Core accepted is only reported.
      */
     async deliver(record, { forward, recordHistory, onHistoryFailure = () => {} }) {
       if (!record?.msgId) throw new TypeError('record.msgId is required');
       if (typeof forward !== 'function') throw new TypeError('forward is required');
       if (typeof recordHistory !== 'function') throw new TypeError('recordHistory is required');
+
+      try {
+        markForwarding(record.msgId);
+      } catch (error) {
+        error.forwarded = false;
+        throw error;
+      }
 
       let result;
       try {
@@ -193,7 +220,7 @@ export function createMessageDeliveryOutbox({
         markFailed(record.msgId, result.outcome);
       } catch (error) {
         // Still report the outcome so the user is told; the record stays pending
-        // in memory (a duplicate) and becomes failed at the next startup.
+        // (forwarding) and is finished as failed at the next startup.
         onError(`unable to record failed delivery for ${record.msgId}: ${error.message}`);
       }
       return { delivered: false, ...result };

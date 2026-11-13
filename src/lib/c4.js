@@ -68,14 +68,14 @@ function neverStarted(error) {
     && typeof error.syscall === 'string' && error.syscall.startsWith('spawn');
 }
 
-function runReceive(args) {
+function runReceive(execFileImpl, args) {
   return new Promise((resolve) => {
     try {
-      execFile('node', args, { encoding: 'utf8' }, (error, stdout, stderr) => {
+      execFileImpl(process.execPath, args, { encoding: 'utf8' }, (error, stdout, stderr) => {
         resolve({ error, stdout: stdout?.trim() || '', stderr: stderr?.trim() || '' });
       });
     } catch (error) {
-      // Invalid arguments (e.g. a NUL byte in the content) throw before spawning.
+      // Invalid arguments (e.g. a NUL byte in the endpoint) throw before spawning.
       resolve({ error, invalidArgs: true, stdout: '', stderr: '' });
     }
   });
@@ -93,13 +93,22 @@ function runReceive(args) {
  * sending a status notice after storing it, and it has no inbound idempotency
  * key, so killing and resending would deliver the message twice. Following
  * Core's contract, a call that is stored or whose outcome is unknown is never
- * retried; only a call that never started is retried once.
+ * retried; only a call that never started is retried once (if it never
+ * starts, nothing was stored). NUL bytes are removed from the content.
  *
  * @returns {Promise<{ outcome: 'sent'|'committed'|'not_stored'|'uncertain', notice: string|null }>}
  *   `outcome` sent/committed means Core has the message. `notice` is the text
  *   to send the WeCom user, or null to send nothing.
  */
-export async function sendToC4({ scriptPath, endpoint, content, logger = console, retryDelayMs = 2000 }) {
+export async function sendToC4({
+  scriptPath,
+  endpoint,
+  content,
+  logger = console,
+  retryDelayMs = 2000,
+  execFileImpl = execFile
+}) {
+  const safeContent = String(content).replace(/\0/g, '');
   let sessionGroup;
   if (c4ReceiveSupportsOption(scriptPath, '--session-group')) {
     try {
@@ -111,8 +120,8 @@ export async function sendToC4({ scriptPath, endpoint, content, logger = console
   }
 
   for (let attempt = 1; ; attempt += 1) {
-    const args = buildC4ReceiveArgs({ scriptPath, endpoint, content, sessionGroup });
-    const { error, invalidArgs, stdout, stderr } = await runReceive(args);
+    const args = buildC4ReceiveArgs({ scriptPath, endpoint, content: safeContent, sessionGroup });
+    const { error, invalidArgs, stdout, stderr } = await runReceive(execFileImpl, args);
     if (invalidArgs) {
       logger.error(`[wecom] C4 receive could not start (invalid arguments), not stored: ${error.message}`);
       return { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY };
@@ -131,16 +140,53 @@ export async function sendToC4({ scriptPath, endpoint, content, logger = console
     }
 
     if (!error) {
-      logger.log(`[wecom] Sent to C4: ${content.substring(0, 80)}...`);
+      logger.log(`[wecom] Sent to C4: ${safeContent.substring(0, 80)}...`);
       return { outcome: 'sent', notice: null };
     }
 
-    if (!neverStarted(error) || attempt >= 2) {
+    if (!neverStarted(error)) {
       logger.error(`[wecom] C4 receive failed, outcome unknown, not resending: ${stderr || error.message}`);
       return { outcome: 'uncertain', notice: UNCERTAIN_REPLY };
+    }
+    if (attempt >= 2) {
+      logger.error(`[wecom] C4 receive did not start after retry, not stored: ${error.message}`);
+      return { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY };
     }
 
     logger.warn(`[wecom] C4 receive did not start, retrying in ${retryDelayMs}ms: ${error.message}`);
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
   }
+}
+
+/**
+ * How long one inbound delivery may hold up its conversation. Core's own
+ * waits are bounded (route lookup and status notice, about 30s each), so this
+ * only fires when c4-receive hangs.
+ */
+export const C4_RECEIVE_WATCHDOG_MS = 3 * 60 * 1000;
+
+/**
+ * Stop waiting for a c4-receive call that hangs, without killing it or
+ * resending: after `ms` the result is an unknown outcome, and whatever the
+ * call does later is only logged.
+ * @param {Promise<{ outcome: string, notice: string|null }>} delivery
+ * @returns {Promise<{ outcome: string, notice: string|null }>}
+ */
+export function withWatchdog(delivery, { ms = C4_RECEIVE_WATCHDOG_MS, label = '', logger = console } = {}) {
+  let timer;
+  let fired = false;
+  const watchdog = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      fired = true;
+      logger.error(`[wecom] C4 receive for ${label} still running after ${ms}ms; no longer waiting (not killed, not resent)`);
+      resolve({ outcome: 'uncertain', notice: UNCERTAIN_REPLY });
+    }, ms);
+    timer.unref?.();
+  });
+  const settled = delivery.then((result) => {
+    clearTimeout(timer);
+    if (fired) logger.warn(`[wecom] C4 receive for ${label} finished late: ${result.outcome}`);
+    return result;
+  });
+  return Promise.race([settled, watchdog]);
 }

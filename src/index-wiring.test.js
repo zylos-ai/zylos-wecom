@@ -176,7 +176,7 @@ process.stdout.write('{"ok":true}');
  * Start src/index.js against a fake WeCom server and a fake multi-session
  * c4-receive (manifest lists --session-group). The fake receiver logs its argv
  * and answers by message text: "reject-not-stored", "reject-committed",
- * "crash", otherwise success.
+ * "crash", "hang" (does not exit for 20s), otherwise success.
  */
 async function startMultiSessionService(t, { journalLines = [] } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-ms-wiring-'));
@@ -197,6 +197,7 @@ const reject = (persisted) => {
 if (content.includes('reject-not-stored')) reject([]);
 else if (content.includes('reject-committed')) reject(['D1']);
 else if (content.includes('crash')) process.exit(3);
+else if (content.includes('hang')) setTimeout(() => process.exit(0), 20000);
 else process.stdout.write('{"ok":true}');
 `);
   fs.writeFileSync(path.join(c4Dir, 'package.json'), '{"type":"commonjs"}');
@@ -299,7 +300,7 @@ test('multi-session Core: groups per chat, rejections notify the user once, noth
     ]);
     assert.ok(!notices.some((n) => /internal core text/.test(n.text)));
 
-    const finalStates = Object.fromEntries(svc.journal().map((e) => [e.msgId, e.state]));
+    const finalStates = Object.fromEntries(svc.journal().map((e) => [e.msgId, e.outcome === 'failed' ? 'failed' : e.state]));
     assert.deepEqual(finalStates, {
       'm-dm-ok': 'delivered',
       'm-g-ok': 'delivered',
@@ -313,27 +314,57 @@ test('multi-session Core: groups per chat, rejections notify the user once, noth
   }
 });
 
-test('a message still pending at startup is finished, not forwarded again', { timeout: 30000 }, async (t) => {
+function pendingLine(msgId, { forwarding = false } = {}) {
+  const receivedAt = new Date().toISOString();
   const record = {
-    msgId: 'm-interrupted',
-    receivedAt: new Date().toISOString(),
-    content: '[WeCom DM] Owner said: hello',
-    endpoint: 'owner1|type:p2p|msg:m-interrupted',
+    msgId,
+    receivedAt,
+    content: `[WeCom DM] Owner said: ${msgId}`,
+    endpoint: `owner1|type:p2p|msg:${msgId}`,
     historyChatId: 'owner1',
-    historyEntry: { msgId: 'm-interrupted', text: 'hello', timestamp: new Date().toISOString() }
+    historyEntry: { msgId, text: msgId, timestamp: receivedAt }
   };
+  return { version: 1, state: 'pending', msgId, receivedAt, record, ...(forwarding ? { forwarding: true } : {}) };
+}
+
+test('restart: an interrupted forward is finished and the user told; a queued one is forwarded', { timeout: 30000 }, async (t) => {
   const svc = await startMultiSessionService(t, {
-    journalLines: [{ version: 1, state: 'pending', msgId: record.msgId, receivedAt: record.receivedAt, record }]
+    journalLines: [pendingLine('m-started', { forwarding: true }), pendingLine('m-queued')]
   });
   try {
-    // The platform redelivers the same msgid after the restart.
-    svc.send({ reqId: 'r-again', msgId: 'm-interrupted', chatType: 'single', userId: 'owner1', text: 'hello' });
+    await waitFor(() => svc.c4Calls().length >= 1 && svc.responds.length >= 1, 10000, 'recovery');
+    // The platform redelivers both msgids after the restart.
+    svc.send({ reqId: 'r-again-1', msgId: 'm-started', chatType: 'single', userId: 'owner1', text: 'again' });
+    svc.send({ reqId: 'r-again-2', msgId: 'm-queued', chatType: 'single', userId: 'owner1', text: 'again' });
     await new Promise((r) => setTimeout(r, 1000));
 
-    assert.deepEqual(svc.c4Calls(), []);
-    const last = svc.journal().filter((e) => e.msgId === 'm-interrupted').at(-1);
-    assert.equal(last.state, 'failed');
-    assert.equal(last.reason, 'interrupted');
+    const forwarded = svc.c4Calls().map((argv) => argValue(argv, '--endpoint'));
+    assert.deepEqual(forwarded, ['owner1|type:p2p|msg:m-queued'], 'queued message forwarded exactly once; started one never again');
+
+    const notices = svc.responds.map((f) => ({ cmd: f.cmd, chatid: f.body?.chatid, text: f.body?.markdown?.content }));
+    assert.deepEqual(notices, [{ cmd: 'aibot_send_msg', chatid: 'owner1', text: UNCERTAIN_REPLY }]);
+
+    const last = (msgId) => svc.journal().filter((e) => e.msgId === msgId).at(-1);
+    assert.equal(last('m-started').outcome, 'failed');
+    assert.equal(last('m-started').reason, 'interrupted');
+    assert.equal(last('m-queued').state, 'delivered');
+    assert.equal(last('m-queued').outcome, undefined);
+  } catch (err) {
+    err.message += `\n--- index.js output ---\n${svc.state.output}`;
+    throw err;
+  }
+});
+
+test('a c4-receive call that hangs does not hold up other chats', { timeout: 30000 }, async (t) => {
+  const svc = await startMultiSessionService(t);
+  try {
+    svc.send({ reqId: 'r-hang', msgId: 'm-hang', chatType: 'single', userId: 'owner1', text: 'hang' });
+    await waitFor(() => svc.c4Calls().length >= 1, 5000, 'hanging call started');
+    svc.send({ reqId: 'r-group', msgId: 'm-group', chatType: 'group', chatId: 'chatOK', userId: 'owner1', text: 'hello group' });
+    await waitFor(() => svc.c4Calls().length >= 2, 5000, 'other chat forwarded while the first call hangs');
+
+    const forwarded = svc.c4Calls().map((argv) => argValue(argv, '--endpoint'));
+    assert.deepEqual(forwarded, ['owner1|type:p2p|msg:m-hang', 'chatOK|type:group|msg:m-group']);
   } catch (err) {
     err.message += `\n--- index.js output ---\n${svc.state.output}`;
     throw err;
