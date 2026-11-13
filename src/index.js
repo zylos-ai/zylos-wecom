@@ -13,7 +13,6 @@
 import dotenv from 'dotenv';
 import http from 'http';
 import crypto from 'crypto';
-import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import WebSocket from 'ws';
@@ -37,6 +36,7 @@ import {
   bindOwnerIfUnbound,
   isOwner as isConfigOwner
 } from './lib/access-notice.js';
+import { sendToC4 } from './lib/c4.js';
 
 // C4 receive interface path
 const C4_RECEIVE = path.join(process.env.HOME, 'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js');
@@ -124,7 +124,7 @@ const messageDeliveryOutbox = createMessageDeliveryOutbox({
     console.error(`[wecom] Message delivery journal load failed: ${message}`);
   },
   onAmbiguousDelivery: (msgId, error) => {
-    console.error(`[wecom] C4 may have accepted ${msgId}, but delivered state was not persisted: ${error.message}. The message remains pending and may be forwarded again after restart.`);
+    console.error(`[wecom] C4 may have accepted ${msgId}, but delivered state was not persisted: ${error.message}. It will not be forwarded again.`);
   }
 });
 const processingMessages = new Map();
@@ -717,70 +717,60 @@ function formatC4Message(chatType, senderName, text, contextMessages = [], media
 // ============================================================
 // Helper: forward message to C4
 // ============================================================
-function forwardToC4(content, replyVia) {
-  const args = [
-    C4_RECEIVE,
-    '--channel', 'wecom',
-    '--endpoint', replyVia,
-    '--json',
-    '--content', content
-  ];
-
-  return new Promise((resolve, reject) => {
-    execFile('node', args, {
-      encoding: 'utf8',
-      timeout: 30000
-    }, (error, stdout, stderr) => {
-      if (error) {
-        const detail = stderr?.trim() || error.message;
-        reject(new Error(detail));
-        return;
-      }
-      console.log(`[wecom] Sent to C4: ${content.substring(0, 80)}...`);
-      resolve(stdout);
-    });
-  });
-}
-
-async function deliverOutboxRecord(record, { retry = false } = {}) {
+async function deliverOutboxRecord(record) {
   if (forwardingMessages.has(record.msgId)) return false;
   forwardingMessages.add(record.msgId);
   try {
-    await messageDeliveryOutbox.deliver(record, {
-      forward: (entry) => forwardToC4(entry.content, entry.endpoint),
-      recordHistory: (entry) => logAndRecordHistory(
-        entry.historyChatId,
-        entry.historyEntry,
-        { checkDisk: retry }
-      )
+    const result = await messageDeliveryOutbox.deliver(record, {
+      forward: (entry) => sendToC4({ scriptPath: C4_RECEIVE, endpoint: entry.endpoint, content: entry.content }),
+      recordHistory: (entry) => logAndRecordHistory(entry.historyChatId, entry.historyEntry, { checkDisk: false }),
+      onHistoryFailure: (msgId) => {
+        console.error(`[wecom] C4 accepted ${msgId} but channel history was not written; it is not forwarded again.`);
+      }
     });
-    processingMessages.delete(record.msgId);
-    return true;
-  } catch (error) {
-    processingMessages.delete(record.msgId);
-    if (error.c4Accepted) {
-      console.error(`[wecom] At-least-once acknowledgement gap for ${record.msgId}: C4 accepted the message but local delivered state is incomplete. A restart will forward this msgid again because C4 has no inbound idempotency key.`);
+    if (!result.delivered) {
+      console.warn(`[wecom] Message ${record.msgId} not delivered (${result.outcome}); it will not be forwarded again.`);
+      if (result.notice) await sendNotice(record.endpoint, record.msgId, result.notice);
     }
-    console.error(`[wecom] Message ${record.msgId} remains pending after delivery failure: ${error.message}`);
+    return result.delivered;
+  } catch (error) {
+    console.error(`[wecom] Delivery state for ${record.msgId} could not be recorded: ${error.message}. It will not be forwarded again.`);
     return false;
   } finally {
+    processingMessages.delete(record.msgId);
     forwardingMessages.delete(record.msgId);
   }
 }
 
-function scheduleOutboxDelivery(record, options) {
-  const scheduled = deliveryQueue.then(() => deliverOutboxRecord(record, options));
+async function sendNotice(endpoint, msgId, text) {
+  const target = String(endpoint).split('|')[0];
+  try {
+    const result = await sendMessage(target, msgId, text);
+    if (!result.ok) console.warn(`[wecom] Notice for ${msgId} failed: ${result.error || 'unknown error'}`);
+  } catch (error) {
+    console.warn(`[wecom] Notice for ${msgId} failed: ${error.message}`);
+  }
+}
+
+function scheduleOutboxDelivery(record) {
+  const scheduled = deliveryQueue.then(() => deliverOutboxRecord(record));
   deliveryQueue = scheduled.catch(() => false);
   return scheduled;
 }
 
-async function recoverPendingDeliveries() {
-  const pending = messageDeliveryOutbox.pendingRecords();
-  if (pending.length === 0) return;
-  console.warn(`[wecom] Recovering ${pending.length} pending C4 message delivery record(s)`);
-  for (const record of pending) {
-    console.warn(`[wecom] Re-forwarding pending msgid ${record.msgId}; it may duplicate if C4 accepted it before the previous process exited because C4 has no inbound idempotency key.`);
-    await scheduleOutboxDelivery(record, { retry: true });
+/**
+ * A record still pending at startup was interrupted while being forwarded, or
+ * before. Core may already have stored it and has no inbound idempotency key,
+ * so it is finished without forwarding it again.
+ */
+function finishInterruptedDeliveries() {
+  for (const record of messageDeliveryOutbox.pendingRecords()) {
+    try {
+      messageDeliveryOutbox.markFailed(record.msgId, 'interrupted');
+      console.warn(`[wecom] Message ${record.msgId} was interrupted before its C4 outcome was known; not forwarding it again.`);
+    } catch (error) {
+      console.error(`[wecom] Could not finish interrupted message ${record.msgId}: ${error.message}`);
+    }
   }
 }
 
@@ -1175,17 +1165,16 @@ async function processCallback(frame) {
       return;
     }
 
-    // Only delivered messages are restart-safe duplicates. Pending messages
-    // remain eligible for redelivery so a crash before C4 acceptance cannot
-    // silently lose them.
+    // A msgid that is known in any state is a duplicate: it was delivered,
+    // finished without delivery, or is being forwarded right now. Core has no
+    // inbound idempotency key, so a message is forwarded at most once.
     const deliveryState = messageDeliveryOutbox.lookup(msgId);
-    if (deliveryState?.state === 'delivered') {
-      messageDeliveryOutbox.enqueue({ msgId });
+    if (deliveryState?.state === 'pending') {
+      console.log(`[wecom] ${localizedRuntimeMessage('runtime_duplicate_msg', { msgId })}`);
       return;
     }
-    if (deliveryState?.state === 'pending') {
-      console.warn(`[wecom] Re-forwarding pending msgid ${msgId}; it may duplicate if C4 accepted it before local delivered state was persisted.`);
-      await scheduleOutboxDelivery(deliveryState.record, { retry: true });
+    if (deliveryState) {
+      messageDeliveryOutbox.enqueue({ msgId });
       return;
     }
     if (processingMessages.has(msgId)) {
@@ -1730,7 +1719,7 @@ async function handleInternalRequest(url, data, res) {
 // Startup
 // ============================================================
 startInternalServer();
-await recoverPendingDeliveries();
+finishInterruptedDeliveries();
 connect();
 
 console.log(`[wecom] ${localizedRuntimeMessage('runtime_bot_id', { botId: `${creds.bot_id.substring(0, 8)}...` })}`);

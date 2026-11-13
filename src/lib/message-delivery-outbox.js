@@ -3,8 +3,12 @@ import path from 'path';
 
 export const DEFAULT_MESSAGE_DELIVERY_TTL_MS = 10 * 60 * 1000;
 
+const STATES = ['pending', 'delivered', 'failed'];
+
 function eventTime(event) {
-  const value = event.state === 'delivered' ? event.deliveredAt : event.receivedAt;
+  const value = event.state === 'delivered' ? event.deliveredAt
+    : event.state === 'failed' ? event.failedAt
+      : event.receivedAt;
   return Date.parse(value);
 }
 
@@ -38,7 +42,7 @@ export function createMessageDeliveryOutbox({
 
   function prune(referenceTime = now()) {
     for (const [msgId, state] of states) {
-      if (state.state !== 'delivered') continue;
+      if (state.state === 'pending') continue;
       const timestamp = eventTime(state);
       if (!Number.isFinite(timestamp) || referenceTime - timestamp > ttlMs) {
         states.delete(msgId);
@@ -67,7 +71,7 @@ export function createMessageDeliveryOutbox({
         onError(`unable to parse delivery journal line ${index + 1}: ${error.message}`);
         continue;
       }
-      if (!event?.msgId || !['pending', 'delivered'].includes(event.state)) {
+      if (!event?.msgId || !STATES.includes(event.state)) {
         onError(`invalid delivery journal event at line ${index + 1}`);
         continue;
       }
@@ -106,13 +110,38 @@ export function createMessageDeliveryOutbox({
     return event;
   }
 
+  /**
+   * Finish a pending message without delivering it again: Core rejected it,
+   * or its outcome is unknown. Core has no inbound idempotency key, so a
+   * message that may already be stored is never resent.
+   */
+  function markFailed(msgId, reason) {
+    const id = String(msgId);
+    const current = states.get(id);
+    if (!current || current.state !== 'pending') {
+      throw new Error(`cannot mark non-pending message failed: ${id}`);
+    }
+    const event = {
+      version: 1,
+      state: 'failed',
+      msgId: id,
+      reason: String(reason),
+      receivedAt: current.receivedAt,
+      failedAt: new Date(now()).toISOString(),
+      record: current.record
+    };
+    appendEvent(event);
+    states.set(id, event);
+    return event;
+  }
+
   return {
     enqueue(record) {
       if (!record?.msgId) throw new TypeError('record.msgId is required');
       const msgId = String(record.msgId);
       prune();
       const existing = states.get(msgId);
-      if (existing?.state === 'delivered') {
+      if (existing && existing.state !== 'pending') {
         onDuplicate(msgId);
         return { status: 'duplicate', record: existing.record || record };
       }
@@ -130,24 +159,38 @@ export function createMessageDeliveryOutbox({
 
     markDelivered,
 
-    async deliver(record, { forward, recordHistory }) {
+    markFailed,
+
+    /**
+     * Forward a pending record once and record the outcome. `forward` resolves
+     * to `{ outcome, notice }` (see sendToC4). When Core has the message
+     * (sent / committed) channel history is written and the record becomes
+     * delivered; otherwise it becomes failed. Either way it is never resent.
+     * A history write failure after Core accepted is only reported: resending
+     * would deliver the message twice.
+     */
+    async deliver(record, { forward, recordHistory, onHistoryFailure = () => {} }) {
       if (!record?.msgId) throw new TypeError('record.msgId is required');
       if (typeof forward !== 'function') throw new TypeError('forward is required');
       if (typeof recordHistory !== 'function') throw new TypeError('recordHistory is required');
 
-      let c4Accepted = false;
+      let result;
       try {
-        await forward(record);
-        c4Accepted = true;
-        if (!recordHistory(record)) {
-          throw new Error(`history persistence failed after C4 accepted ${record.msgId}`);
-        }
-        markDelivered(record.msgId);
-        return { delivered: true, c4Accepted: true };
+        result = await forward(record);
       } catch (error) {
-        error.c4Accepted = c4Accepted;
-        throw error;
+        result = { outcome: 'uncertain', notice: null, error };
       }
+      if (result.outcome === 'sent' || result.outcome === 'committed') {
+        let historyOk = false;
+        try {
+          historyOk = recordHistory(record) === true;
+        } catch { /* reported below */ }
+        if (!historyOk) onHistoryFailure(record.msgId);
+        markDelivered(record.msgId);
+        return { delivered: true, ...result };
+      }
+      markFailed(record.msgId, result.outcome);
+      return { delivered: false, ...result };
     },
 
     lookup(msgId) {

@@ -149,7 +149,7 @@ First private message sender becomes the owner:
 
 1. WebSocket receives `aibot_msg_callback` JSON frame
 2. Extract: msgId, chatType, from.userid, msgtype, content
-3. Suppress delivered msgIds; recover pending msgIds (10-minute delivered TTL)
+3. Suppress known msgIds in any state (10-minute TTL)
 4. Track reqId for reply (5-minute TTL)
 5. Check permissions (DM policy / group policy)
 6. Auto-bind owner if first DM
@@ -157,21 +157,30 @@ First private message sender becomes the owner:
 8. Replay existing history and format the C4 message
 9. Persist a `pending` delivery record keyed by the stable WeCom `body.msgid`
 10. Forward to C4
-11. Append channel history, then persist `delivered`
+11. Core has it: append channel history, then persist `delivered`.
+    Rejected or unknown: persist `failed` and notify the user (except when Core
+    already stored it)
 
 ### Restart delivery boundary
 
-The delivery journal separates receipt from confirmed C4 acceptance. Pending
-records are retried in receive order at startup; only delivered records are
-suppressed during the 10-minute retry-safe window. Persistence and forwarding
-failures are logged and remain pending rather than being silently discarded.
+The delivery journal separates receipt from the C4 outcome. Each `msgid` is
+forwarded at most once, following Core's c4-receive contract ("do not
+automatically retry an uncertain or already committed inbound call"):
 
-C4 currently has no inbound idempotency key. If the process exits after C4 has
-accepted a message but before the delivered marker is durably appended, startup
-recovery forwards that stable `msgid` again. This narrow acknowledgement gap is
-an explicit at-least-once boundary until C4 adds consumer-side `msgid`
-idempotency; the component logs the ambiguous state instead of claiming
-end-to-end exactly-once delivery.
+- C4 has no inbound idempotency key; a second forward stores a second row.
+- c4-receive may store the message and keep running (route lookup up to 30s
+  before the insert, status notice up to 30s after it), so it runs without a
+  component timeout, and a failure without a structured result is an unknown
+  outcome, not permission to resend.
+- Outcomes: success or `persisted` non-empty -> `delivered`; `persisted: []`
+  -> `failed`, user told to try again later; `persisted: null`, no structured
+  result, or a crash -> `failed`, user told the message may not have arrived.
+- A record still `pending` at startup was interrupted with an unknown outcome;
+  it becomes `failed` and is not forwarded again.
+- A lost `delivered` marker or history write after C4 accepted is logged only.
+
+Known msgids in any state are suppressed during the 10-minute window that
+covers WeCom's callback retries.
 
 ### Outgoing Message
 
