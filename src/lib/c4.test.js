@@ -136,3 +136,12 @@ test('a process that never started is retried once', async () => {
   assert.match(warnings[0], /did not start/);
   assert.equal(calls().length, 1);
 });
+
+test('content c4-receive cannot be started with (NUL byte) is reported, not thrown or retried', async () => {
+  setManifest(SUPPORTED);
+  fs.rmSync(callLog, { force: true });
+  process.env.FAKE_C4_MODE = 'ok';
+  const result = await sendToC4({ scriptPath, endpoint: ENDPOINT, content: 'a\0b', logger: quiet, retryDelayMs: 10 });
+  assert.deepEqual(result, { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY });
+  assert.deepEqual(calls(), []);
+});

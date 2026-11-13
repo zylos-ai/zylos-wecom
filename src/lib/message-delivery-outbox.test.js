@@ -222,3 +222,25 @@ test('does not forward when pending state cannot be persisted', async () => {
   assert.equal(outbox.lookup('write-failure'), null);
   assert.equal(forwards, 0);
 });
+
+test('a failed-state write error still reports the outcome so the user can be told', async () => {
+  const { journalPath } = fixture();
+  const errors = [];
+  const outbox = createMessageDeliveryOutbox({
+    journalPath,
+    appendEvent(event) {
+      if (event.state === 'failed') throw new Error('simulated failed marker failure');
+      fs.appendFileSync(journalPath, `${JSON.stringify(event)}\n`);
+    },
+    onError: (message) => errors.push(message)
+  });
+  const pending = outbox.enqueue(record('fail-write')).record;
+  const result = await outbox.deliver(pending, {
+    forward: async () => ({ outcome: 'not_stored', notice: 'try later' }),
+    recordHistory: () => true
+  });
+  assert.deepEqual(result, { delivered: false, outcome: 'not_stored', notice: 'try later' });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /simulated failed marker failure/);
+  assert.equal(outbox.lookup('fail-write').state, 'pending', 'stays a duplicate in memory');
+});

@@ -189,7 +189,13 @@ export function createMessageDeliveryOutbox({
         markDelivered(record.msgId);
         return { delivered: true, ...result };
       }
-      markFailed(record.msgId, result.outcome);
+      try {
+        markFailed(record.msgId, result.outcome);
+      } catch (error) {
+        // Still report the outcome so the user is told; the record stays pending
+        // in memory (a duplicate) and becomes failed at the next startup.
+        onError(`unable to record failed delivery for ${record.msgId}: ${error.message}`);
+      }
       return { delivered: false, ...result };
     },
 

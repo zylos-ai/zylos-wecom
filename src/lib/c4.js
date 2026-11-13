@@ -70,9 +70,14 @@ function neverStarted(error) {
 
 function runReceive(args) {
   return new Promise((resolve) => {
-    execFile('node', args, { encoding: 'utf8' }, (error, stdout, stderr) => {
-      resolve({ error, stdout: stdout?.trim() || '', stderr: stderr?.trim() || '' });
-    });
+    try {
+      execFile('node', args, { encoding: 'utf8' }, (error, stdout, stderr) => {
+        resolve({ error, stdout: stdout?.trim() || '', stderr: stderr?.trim() || '' });
+      });
+    } catch (error) {
+      // Invalid arguments (e.g. a NUL byte in the content) throw before spawning.
+      resolve({ error, invalidArgs: true, stdout: '', stderr: '' });
+    }
   });
 }
 
@@ -107,7 +112,11 @@ export async function sendToC4({ scriptPath, endpoint, content, logger = console
 
   for (let attempt = 1; ; attempt += 1) {
     const args = buildC4ReceiveArgs({ scriptPath, endpoint, content, sessionGroup });
-    const { error, stdout, stderr } = await runReceive(args);
+    const { error, invalidArgs, stdout, stderr } = await runReceive(args);
+    if (invalidArgs) {
+      logger.error(`[wecom] C4 receive could not start (invalid arguments), not stored: ${error.message}`);
+      return { outcome: 'not_stored', notice: GENERIC_REJECT_REPLY };
+    }
     const response = parseC4Response(stdout);
 
     if (response?.ok === false && response.error) {
