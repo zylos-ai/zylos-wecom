@@ -106,6 +106,52 @@ export function createMessageDeliveryOutbox({
     return event;
   }
 
+  /**
+   * Record that forwarding of a pending message is about to start. A record
+   * still pending at startup without this marker never reached c4-receive and
+   * can be forwarded safely; with it, Core may already have stored it.
+   * Written as a `pending` event so older versions still read the journal.
+   */
+  function markForwarding(msgId) {
+    const id = String(msgId);
+    const current = states.get(id);
+    if (!current || current.state !== 'pending') {
+      throw new Error(`cannot mark non-pending message forwarding: ${id}`);
+    }
+    const event = { ...current, forwarding: true };
+    appendEvent(event);
+    states.set(id, event);
+    return event;
+  }
+
+  /**
+   * Finish a pending message without forwarding it (again): Core rejected it,
+   * or its outcome is unknown. Core has no inbound idempotency key, so a
+   * message that may already be stored is never resent. Written as a
+   * `delivered` event with `outcome: 'failed'` so that older versions, which
+   * only know pending/delivered, also never forward it again.
+   */
+  function markFailed(msgId, reason) {
+    const id = String(msgId);
+    const current = states.get(id);
+    if (!current || current.state !== 'pending') {
+      throw new Error(`cannot mark non-pending message failed: ${id}`);
+    }
+    const event = {
+      version: 1,
+      state: 'delivered',
+      outcome: 'failed',
+      reason: String(reason),
+      msgId: id,
+      receivedAt: current.receivedAt,
+      deliveredAt: new Date(now()).toISOString(),
+      record: current.record
+    };
+    appendEvent(event);
+    states.set(id, event);
+    return event;
+  }
+
   return {
     enqueue(record) {
       if (!record?.msgId) throw new TypeError('record.msgId is required');
@@ -130,24 +176,54 @@ export function createMessageDeliveryOutbox({
 
     markDelivered,
 
-    async deliver(record, { forward, recordHistory }) {
+    markForwarding,
+
+    markFailed,
+
+    /**
+     * Forward a pending record once and record the outcome. `forward` resolves
+     * to `{ outcome, notice }` (see sendToC4). The forwarding marker is written
+     * first; if it cannot be written the record is not forwarded (error with
+     * `forwarded: false`). When Core has the message (sent / committed) channel
+     * history is written and the record becomes delivered; otherwise it is
+     * finished as failed. Either way it is never resent. A history write
+     * failure after Core accepted is only reported.
+     */
+    async deliver(record, { forward, recordHistory, onHistoryFailure = () => {} }) {
       if (!record?.msgId) throw new TypeError('record.msgId is required');
       if (typeof forward !== 'function') throw new TypeError('forward is required');
       if (typeof recordHistory !== 'function') throw new TypeError('recordHistory is required');
 
-      let c4Accepted = false;
       try {
-        await forward(record);
-        c4Accepted = true;
-        if (!recordHistory(record)) {
-          throw new Error(`history persistence failed after C4 accepted ${record.msgId}`);
-        }
-        markDelivered(record.msgId);
-        return { delivered: true, c4Accepted: true };
+        markForwarding(record.msgId);
       } catch (error) {
-        error.c4Accepted = c4Accepted;
+        error.forwarded = false;
         throw error;
       }
+
+      let result;
+      try {
+        result = await forward(record);
+      } catch (error) {
+        result = { outcome: 'uncertain', notice: null, error };
+      }
+      if (result.outcome === 'sent' || result.outcome === 'committed') {
+        let historyOk = false;
+        try {
+          historyOk = recordHistory(record) === true;
+        } catch { /* reported below */ }
+        if (!historyOk) onHistoryFailure(record.msgId);
+        markDelivered(record.msgId);
+        return { delivered: true, ...result };
+      }
+      try {
+        markFailed(record.msgId, result.outcome);
+      } catch (error) {
+        // Still report the outcome so the user is told; the record stays pending
+        // (forwarding) and is finished as failed at the next startup.
+        onError(`unable to record failed delivery for ${record.msgId}: ${error.message}`);
+      }
+      return { delivered: false, ...result };
     },
 
     lookup(msgId) {

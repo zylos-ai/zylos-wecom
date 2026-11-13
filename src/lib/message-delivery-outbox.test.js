@@ -41,7 +41,7 @@ test('suppresses only messages that have reached delivered state', () => {
   assert.deepEqual(duplicates, ['stable-1']);
 });
 
-test('restarts with pending records ordered and eligible for redelivery', () => {
+test('restarts with pending records in receive order', () => {
   const { journalPath } = fixture();
   const beforeRestart = createMessageDeliveryOutbox({ journalPath });
   beforeRestart.enqueue(record('before-1', '2026-08-18T10:00:00.000Z'));
@@ -55,74 +55,180 @@ test('restarts with pending records ordered and eligible for redelivery', () => 
   assert.equal(afterRestart.lookup('before-1').state, 'pending');
 });
 
-test('recovers crash after persist and before C4 delivery without message loss', async () => {
+const accepted = async () => ({ outcome: 'sent', notice: null });
+
+const journalStates = (journalPath) => fs.readFileSync(journalPath, 'utf8')
+  .split('\n').filter(Boolean).map((line) => JSON.parse(line));
+
+test('marks forwarding before forwarding, so a restart can tell queued from started', async () => {
   const { journalPath } = fixture();
-  createMessageDeliveryOutbox({ journalPath }).enqueue(record('crash-before-c4'));
+  const outbox = createMessageDeliveryOutbox({ journalPath });
+  outbox.enqueue(record('queued'));
+  outbox.enqueue(record('started'));
+  outbox.markForwarding('started');
 
   const restarted = createMessageDeliveryOutbox({ journalPath });
-  const forwarded = [];
-  const history = [];
-  for (const pending of restarted.pendingRecords()) {
-    await restarted.deliver(pending, {
-      forward: async (entry) => forwarded.push(entry.msgId),
-      recordHistory: (entry) => {
-        history.push(entry.msgId);
-        return true;
-      }
-    });
-  }
+  assert.deepEqual(restarted.pendingRecords().map((entry) => entry.msgId), ['queued', 'started']);
+  assert.equal(restarted.lookup('queued').forwarding, undefined);
+  assert.equal(restarted.lookup('started').forwarding, true);
 
-  assert.deepEqual(forwarded, ['crash-before-c4']);
-  assert.deepEqual(history, ['crash-before-c4']);
-  assert.equal(restarted.lookup('crash-before-c4').state, 'delivered');
+  let markedBeforeForward;
+  await outbox.deliver(outbox.lookup('queued').record, {
+    forward: async () => {
+      markedBeforeForward = createMessageDeliveryOutbox({ journalPath }).lookup('queued').forwarding;
+      return { outcome: 'sent', notice: null };
+    },
+    recordHistory: () => true
+  });
+  assert.equal(markedBeforeForward, true, 'marker is durable before c4-receive starts');
 });
 
-test('keeps ambiguous C4 success pending and visibly retries without pretending downstream dedupe', async () => {
+test('a forwarding marker that cannot be written stops the forward', async () => {
   const { journalPath } = fixture();
-  const first = createMessageDeliveryOutbox({ journalPath });
-  first.enqueue(record('ack-gap'));
+  const outbox = createMessageDeliveryOutbox({
+    journalPath,
+    appendEvent(event) {
+      if (event.forwarding) throw new Error('simulated marker failure');
+      fs.appendFileSync(journalPath, `${JSON.stringify(event)}\n`);
+    }
+  });
+  const pending = outbox.enqueue(record('no-marker')).record;
+  let forwards = 0;
+  await assert.rejects(
+    outbox.deliver(pending, { forward: async () => { forwards += 1; return { outcome: 'sent' }; }, recordHistory: () => true }),
+    (error) => error.forwarded === false
+  );
+  assert.equal(forwards, 0);
+});
+
+test('finishes an interrupted record without forwarding it again', () => {
+  const { journalPath } = fixture();
+  const writer = createMessageDeliveryOutbox({ journalPath });
+  writer.enqueue(record('crash-in-c4'));
+  writer.markForwarding('crash-in-c4');
+
+  const restarted = createMessageDeliveryOutbox({ journalPath });
+  restarted.markFailed('crash-in-c4', 'interrupted');
+  assert.deepEqual(restarted.pendingRecords(), []);
+  assert.equal(restarted.enqueue(record('crash-in-c4')).status, 'duplicate');
+
+  const again = createMessageDeliveryOutbox({ journalPath });
+  assert.deepEqual(again.pendingRecords(), [], 'finished state survives restart');
+  assert.equal(again.lookup('crash-in-c4').outcome, 'failed');
+  assert.equal(again.lookup('crash-in-c4').reason, 'interrupted');
+});
+
+test('journal stays readable by the previous version: only pending/delivered, pending carries its record', () => {
+  const { journalPath } = fixture();
+  const outbox = createMessageDeliveryOutbox({ journalPath });
+  outbox.enqueue(record('a'));
+  outbox.markForwarding('a');
+  outbox.markFailed('a', 'uncertain');
+  outbox.enqueue(record('b'));
+  outbox.markForwarding('b');
+  outbox.markDelivered('b');
+
+  for (const event of journalStates(journalPath)) {
+    assert.ok(['pending', 'delivered'].includes(event.state), JSON.stringify(event));
+    if (event.state === 'pending') assert.equal(event.record?.msgId, event.msgId);
+  }
+  // A version that only knows pending/delivered sees both as delivered: never resent.
+  const last = Object.fromEntries(journalStates(journalPath).map((e) => [e.msgId, e.state]));
+  assert.deepEqual(last, { a: 'delivered', b: 'delivered' });
+});
+
+test('a lost delivered marker after C4 acceptance never leads to a second forward', async () => {
+  const { journalPath } = fixture();
+  createMessageDeliveryOutbox({ journalPath }).enqueue(record('ack-gap'));
 
   const warnings = [];
-  let rejectDeliveredWrite = true;
   const ambiguous = createMessageDeliveryOutbox({
     journalPath,
     appendEvent(event) {
-      if (event.state === 'delivered' && rejectDeliveredWrite) {
-        throw new Error('simulated delivered marker failure');
-      }
+      if (event.state === 'delivered') throw new Error('simulated delivered marker failure');
       fs.appendFileSync(journalPath, `${JSON.stringify(event)}\n`);
     },
     onAmbiguousDelivery: (msgId, error) => warnings.push(`${msgId}:${error.message}`)
   });
-
-  const forwarded = [];
-  const history = new Set();
   await assert.rejects(
-    ambiguous.deliver(ambiguous.pendingRecords()[0], {
-      forward: async (entry) => forwarded.push(entry.msgId),
-      recordHistory: (entry) => {
-        history.add(entry.msgId);
-        return true;
-      }
-    }),
-    (error) => error.c4Accepted === true && /simulated delivered marker failure/.test(error.message)
+    ambiguous.deliver(ambiguous.pendingRecords()[0], { forward: async () => ({ outcome: 'sent', notice: null }), recordHistory: () => true }),
+    /simulated delivered marker failure/
   );
-  assert.equal(ambiguous.lookup('ack-gap').state, 'pending');
   assert.equal(warnings.length, 1);
 
+  // After a restart the record is pending with the forwarding marker: it is
+  // finished as interrupted, not forwarded again.
   const restarted = createMessageDeliveryOutbox({ journalPath });
-  await restarted.deliver(restarted.pendingRecords()[0], {
-    forward: async (entry) => forwarded.push(entry.msgId),
-    recordHistory: (entry) => {
-      history.add(entry.msgId);
-      return true;
-    }
-  });
+  assert.equal(restarted.lookup('ack-gap').forwarding, true);
+});
 
-  assert.deepEqual(forwarded, ['ack-gap', 'ack-gap'], 'the acknowledgement gap is an observable duplicate forward');
-  assert.equal(history.size, 1, 'channel history remains idempotent by stable msgid');
-  assert.equal(restarted.lookup('ack-gap').state, 'delivered');
-  rejectDeliveredWrite = false;
+test('records history and delivered state when Core has the message', async () => {
+  for (const outcome of ['sent', 'committed']) {
+    const { journalPath } = fixture();
+    const outbox = createMessageDeliveryOutbox({ journalPath });
+    const pending = outbox.enqueue(record(`ok-${outcome}`)).record;
+    const history = [];
+    const result = await outbox.deliver(pending, {
+      forward: async () => ({ outcome, notice: null }),
+      recordHistory: (entry) => { history.push(entry.msgId); return true; }
+    });
+    assert.equal(result.delivered, true, outcome);
+    assert.deepEqual(history, [`ok-${outcome}`]);
+    assert.equal(outbox.lookup(`ok-${outcome}`).state, 'delivered');
+  }
+});
+
+test('a history write failure after C4 acceptance is reported, not retried', async () => {
+  const { journalPath } = fixture();
+  const outbox = createMessageDeliveryOutbox({ journalPath });
+  const pending = outbox.enqueue(record('history-gap')).record;
+  const reported = [];
+  const result = await outbox.deliver(pending, {
+    forward: accepted,
+    recordHistory: () => false,
+    onHistoryFailure: (msgId) => reported.push(msgId)
+  });
+  assert.equal(result.delivered, true);
+  assert.deepEqual(reported, ['history-gap']);
+  assert.equal(outbox.lookup('history-gap').state, 'delivered');
+});
+
+test('finishes rejected or uncertain messages as failed, without history, never resent', async () => {
+  const cases = [
+    ['not_stored', async () => ({ outcome: 'not_stored', notice: 'try later' })],
+    ['uncertain', async () => ({ outcome: 'uncertain', notice: 'may not have arrived' })],
+    ['uncertain', async () => { throw new Error('C4 unavailable'); }]
+  ];
+  for (const [index, [expected, forward]] of cases.entries()) {
+    const { journalPath } = fixture();
+    const outbox = createMessageDeliveryOutbox({ journalPath });
+    const msgId = `c4-failure-${index}`;
+    const pending = outbox.enqueue(record(msgId)).record;
+    let historyWrites = 0;
+    const result = await outbox.deliver(pending, {
+      forward,
+      recordHistory: () => { historyWrites += 1; return true; }
+    });
+    assert.equal(result.delivered, false);
+    assert.equal(result.outcome, expected);
+    assert.equal(historyWrites, 0);
+    assert.equal(outbox.lookup(msgId).outcome, 'failed');
+    assert.equal(outbox.lookup(msgId).reason, expected);
+    assert.equal(outbox.enqueue(record(msgId)).status, 'duplicate');
+  }
+});
+
+test('expires failed suppression after the same TTL as delivered', () => {
+  const { journalPath } = fixture();
+  const failedAt = Date.parse('2026-08-18T10:00:00.000Z');
+  const writer = createMessageDeliveryOutbox({ journalPath, now: () => failedAt });
+  writer.enqueue(record('ttl-failed'));
+  writer.markFailed('ttl-failed', 'uncertain');
+
+  const within = createMessageDeliveryOutbox({ journalPath, now: () => failedAt + DEFAULT_MESSAGE_DELIVERY_TTL_MS });
+  assert.equal(within.enqueue(record('ttl-failed')).status, 'duplicate');
+  const outside = createMessageDeliveryOutbox({ journalPath, now: () => failedAt + DEFAULT_MESSAGE_DELIVERY_TTL_MS + 1 });
+  assert.equal(outside.enqueue(record('ttl-failed')).status, 'pending');
 });
 
 test('expires delivered suppression only after the retry-safe TTL', () => {
@@ -174,22 +280,25 @@ test('does not forward when pending state cannot be persisted', async () => {
   assert.equal(forwards, 0);
 });
 
-test('keeps a message pending when C4 explicitly rejects delivery', async () => {
+test('a failed-state write error still reports the outcome so the user can be told', async () => {
   const { journalPath } = fixture();
-  const outbox = createMessageDeliveryOutbox({ journalPath });
-  const pending = outbox.enqueue(record('c4-failure')).record;
-  let historyWrites = 0;
-
-  await assert.rejects(
-    outbox.deliver(pending, {
-      forward: async () => { throw new Error('C4 unavailable'); },
-      recordHistory: () => {
-        historyWrites += 1;
-        return true;
-      }
-    }),
-    (error) => error.c4Accepted === false && /C4 unavailable/.test(error.message)
-  );
-  assert.equal(outbox.lookup('c4-failure').state, 'pending');
-  assert.equal(historyWrites, 0);
+  const errors = [];
+  const outbox = createMessageDeliveryOutbox({
+    journalPath,
+    appendEvent(event) {
+      if (event.outcome === 'failed') throw new Error('simulated failed marker failure');
+      fs.appendFileSync(journalPath, `${JSON.stringify(event)}\n`);
+    },
+    onError: (message) => errors.push(message)
+  });
+  const pending = outbox.enqueue(record('fail-write')).record;
+  const result = await outbox.deliver(pending, {
+    forward: async () => ({ outcome: 'not_stored', notice: 'try later' }),
+    recordHistory: () => true
+  });
+  assert.deepEqual(result, { delivered: false, outcome: 'not_stored', notice: 'try later' });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /simulated failed marker failure/);
+  assert.equal(outbox.lookup('fail-write').state, 'pending', 'stays a duplicate in memory');
+  assert.equal(outbox.lookup('fail-write').forwarding, true, 'finished as interrupted at the next startup');
 });

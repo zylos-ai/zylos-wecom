@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
 import { GROUP_NOT_ENABLED_NOTICE, GROUP_NO_PERMISSION_NOTICE } from './lib/access-notice.js';
+import { GENERIC_REJECT_REPLY, UNCERTAIN_REPLY } from './lib/c4.js';
 
 const INDEX_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.js');
 
@@ -167,6 +168,205 @@ process.stdout.write('{"ok":true}');
     ]);
   } catch (err) {
     err.message += `\n--- index.js output ---\n${output}`;
+    throw err;
+  }
+});
+
+/**
+ * Start src/index.js against a fake WeCom server and a fake multi-session
+ * c4-receive (manifest lists --session-group). The fake receiver logs its argv
+ * and answers by message text: "reject-not-stored", "reject-committed",
+ * "crash", "hang" (does not exit for 20s), otherwise success.
+ */
+async function startMultiSessionService(t, { journalLines = [] } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-ms-wiring-'));
+  const dataDir = path.join(home, 'zylos/components/wecom');
+  const c4Dir = path.join(home, 'zylos/.claude/skills/comm-bridge/scripts');
+  const c4Log = path.join(home, 'c4-calls.jsonl');
+  const journalPath = path.join(dataDir, 'message-delivery.jsonl');
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(c4Dir, { recursive: true });
+  fs.writeFileSync(path.join(c4Dir, 'c4-receive.js'), `const fs = require('fs');
+const a = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(c4Log)}, JSON.stringify(a) + '\\n');
+const content = a[a.indexOf('--content') + 1];
+const reject = (persisted) => {
+  process.stdout.write(JSON.stringify({ ok: false, error: { code: 'X', message: 'internal core text', persisted } }));
+  process.exit(1);
+};
+if (content.includes('reject-not-stored')) reject([]);
+else if (content.includes('reject-committed')) reject(['D1']);
+else if (content.includes('crash')) process.exit(3);
+else if (content.includes('hang')) setTimeout(() => process.exit(0), 20000);
+else process.stdout.write('{"ok":true}');
+`);
+  fs.writeFileSync(path.join(c4Dir, 'package.json'), '{"type":"commonjs"}');
+  fs.writeFileSync(path.join(c4Dir, 'c4-receive-options.json'),
+    JSON.stringify({ options: { '--session-group': { takesValue: true } } }));
+  if (journalLines.length) fs.writeFileSync(journalPath, journalLines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await new Promise((r) => wss.once('listening', r));
+  fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+    enabled: true,
+    internal_port: await freePort(),
+    owner: { bound: true, user_id: 'owner1', name: 'Owner' },
+    dmPolicy: 'owner',
+    dmAllowFrom: [],
+    groupPolicy: 'allowlist',
+    groups: { chatOK: { name: 'OK' } },
+    message: { locale: 'en-US' },
+    ws: { url: `ws://127.0.0.1:${wss.address().port}`, reconnect_initial_delay: 60000 },
+    doc: { fetch_timeout_ms: 200 }
+  }));
+
+  const responds = [];
+  let socket = null;
+  wss.on('connection', (s) => {
+    socket = s;
+    s.on('message', (raw) => {
+      const frame = JSON.parse(raw.toString());
+      const reqId = frame.headers?.req_id;
+      if (frame.cmd === 'aibot_subscribe') {
+        s.send(JSON.stringify({ headers: { req_id: reqId }, errcode: 0, errmsg: 'ok' }));
+      } else if (frame.cmd === 'aibot_respond_msg' || frame.cmd === 'aibot_send_msg') {
+        responds.push(frame);
+        s.send(JSON.stringify({ cmd: frame.cmd, headers: { req_id: reqId }, body: { code: 0 } }));
+      }
+    });
+  });
+
+  const state = { output: '' };
+  const child = spawn(process.execPath, [INDEX_PATH], {
+    env: { PATH: process.env.PATH, HOME: home, LANG: 'en_US.UTF-8', WECOM_BOT_ID: 'test-bot', WECOM_BOT_SECRET: 'test-secret' },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  child.stdout.on('data', (d) => { state.output += d; });
+  child.stderr.on('data', (d) => { state.output += d; });
+  t.after(async () => {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await new Promise((r) => child.once('exit', r));
+    }
+    await new Promise((r) => wss.close(r));
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await waitFor(() => /Authenticated successfully/.test(state.output), 10000, 'authentication');
+  return {
+    state,
+    responds,
+    send: (f) => socket.send(msgFrame(f)),
+    c4Calls: () => readC4Calls(c4Log),
+    journal: () => (fs.existsSync(journalPath)
+      ? fs.readFileSync(journalPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      : [])
+  };
+}
+
+const argValue = (argv, name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+
+test('multi-session Core: groups per chat, rejections notify the user once, nothing is resent', { timeout: 30000 }, async (t) => {
+  const svc = await startMultiSessionService(t);
+  try {
+    svc.send({ reqId: 'r-dm-ok', msgId: 'm-dm-ok', chatType: 'single', userId: 'owner1', text: 'hello' });
+    svc.send({ reqId: 'r-g-ok', msgId: 'm-g-ok', chatType: 'group', chatId: 'chatOK', userId: 'owner1', text: 'hello group' });
+    svc.send({ reqId: 'r-not-stored', msgId: 'm-not-stored', chatType: 'single', userId: 'owner1', text: 'reject-not-stored' });
+    svc.send({ reqId: 'r-committed', msgId: 'm-committed', chatType: 'single', userId: 'owner1', text: 'reject-committed' });
+    svc.send({ reqId: 'r-crash', msgId: 'm-crash', chatType: 'single', userId: 'owner1', text: 'crash' });
+
+    await waitFor(() => svc.c4Calls().length >= 5 && svc.responds.length >= 2, 15000, 'five C4 calls and two notices');
+    // WeCom redelivers a callback it considers unanswered: same msgid again.
+    svc.send({ reqId: 'r-crash-2', msgId: 'm-crash', chatType: 'single', userId: 'owner1', text: 'crash' });
+    await new Promise((r) => setTimeout(r, 500));
+
+    const calls = svc.c4Calls();
+    assert.equal(calls.length, 5, 'every message forwarded exactly once');
+    const groups = Object.fromEntries(calls.map((argv) => [argValue(argv, '--endpoint').split('|msg:')[1], argValue(argv, '--session-group')]));
+    assert.deepEqual(groups, {
+      'm-dm-ok': 'dm-owner1',
+      'm-g-ok': 'group-chatOK',
+      'm-not-stored': 'dm-owner1',
+      'm-committed': 'dm-owner1',
+      'm-crash': 'dm-owner1'
+    });
+
+    const notices = svc.responds
+      .map((f) => ({ reqId: f.headers.req_id, text: f.body?.markdown?.content }))
+      .sort((a, b) => a.reqId.localeCompare(b.reqId));
+    assert.deepEqual(notices, [
+      { reqId: 'r-crash', text: UNCERTAIN_REPLY },
+      { reqId: 'r-not-stored', text: GENERIC_REJECT_REPLY }
+    ]);
+    assert.ok(!notices.some((n) => /internal core text/.test(n.text)));
+
+    const finalStates = Object.fromEntries(svc.journal().map((e) => [e.msgId, e.outcome === 'failed' ? 'failed' : e.state]));
+    assert.deepEqual(finalStates, {
+      'm-dm-ok': 'delivered',
+      'm-g-ok': 'delivered',
+      'm-not-stored': 'failed',
+      'm-committed': 'delivered',
+      'm-crash': 'failed'
+    });
+  } catch (err) {
+    err.message += `\n--- index.js output ---\n${svc.state.output}`;
+    throw err;
+  }
+});
+
+function pendingLine(msgId, { forwarding = false } = {}) {
+  const receivedAt = new Date().toISOString();
+  const record = {
+    msgId,
+    receivedAt,
+    content: `[WeCom DM] Owner said: ${msgId}`,
+    endpoint: `owner1|type:p2p|msg:${msgId}`,
+    historyChatId: 'owner1',
+    historyEntry: { msgId, text: msgId, timestamp: receivedAt }
+  };
+  return { version: 1, state: 'pending', msgId, receivedAt, record, ...(forwarding ? { forwarding: true } : {}) };
+}
+
+test('restart: an interrupted forward is finished and the user told; a queued one is forwarded', { timeout: 30000 }, async (t) => {
+  const svc = await startMultiSessionService(t, {
+    journalLines: [pendingLine('m-started', { forwarding: true }), pendingLine('m-queued')]
+  });
+  try {
+    await waitFor(() => svc.c4Calls().length >= 1 && svc.responds.length >= 1, 10000, 'recovery');
+    // The platform redelivers both msgids after the restart.
+    svc.send({ reqId: 'r-again-1', msgId: 'm-started', chatType: 'single', userId: 'owner1', text: 'again' });
+    svc.send({ reqId: 'r-again-2', msgId: 'm-queued', chatType: 'single', userId: 'owner1', text: 'again' });
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const forwarded = svc.c4Calls().map((argv) => argValue(argv, '--endpoint'));
+    assert.deepEqual(forwarded, ['owner1|type:p2p|msg:m-queued'], 'queued message forwarded exactly once; started one never again');
+
+    const notices = svc.responds.map((f) => ({ cmd: f.cmd, chatid: f.body?.chatid, text: f.body?.markdown?.content }));
+    assert.deepEqual(notices, [{ cmd: 'aibot_send_msg', chatid: 'owner1', text: UNCERTAIN_REPLY }]);
+
+    const last = (msgId) => svc.journal().filter((e) => e.msgId === msgId).at(-1);
+    assert.equal(last('m-started').outcome, 'failed');
+    assert.equal(last('m-started').reason, 'interrupted');
+    assert.equal(last('m-queued').state, 'delivered');
+    assert.equal(last('m-queued').outcome, undefined);
+  } catch (err) {
+    err.message += `\n--- index.js output ---\n${svc.state.output}`;
+    throw err;
+  }
+});
+
+test('a c4-receive call that hangs does not hold up other chats', { timeout: 30000 }, async (t) => {
+  const svc = await startMultiSessionService(t);
+  try {
+    svc.send({ reqId: 'r-hang', msgId: 'm-hang', chatType: 'single', userId: 'owner1', text: 'hang' });
+    await waitFor(() => svc.c4Calls().length >= 1, 5000, 'hanging call started');
+    svc.send({ reqId: 'r-group', msgId: 'm-group', chatType: 'group', chatId: 'chatOK', userId: 'owner1', text: 'hello group' });
+    await waitFor(() => svc.c4Calls().length >= 2, 5000, 'other chat forwarded while the first call hangs');
+
+    const forwarded = svc.c4Calls().map((argv) => argValue(argv, '--endpoint'));
+    assert.deepEqual(forwarded, ['owner1|type:p2p|msg:m-hang', 'chatOK|type:group|msg:m-group']);
+  } catch (err) {
+    err.message += `\n--- index.js output ---\n${svc.state.output}`;
     throw err;
   }
 });
